@@ -1211,6 +1211,16 @@ a{color:inherit;text-decoration:none}
         <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-cloud"></i></div><div class="srv-tile-text"><div class="srv-tile-label">پلتفرم</div><div class="srv-tile-val">Railway</div></div></div>
         <div class="srv-tile" style="grid-column:1/-1"><div class="srv-tile-icon"><i class="ti ti-device-floppy"></i></div><div class="srv-tile-text"><div class="srv-tile-label">ذخیره‌سازی</div><div class="srv-tile-val">JSON File (/data)</div></div></div>
       </div>
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--card-b)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div class="srv-tile-icon"><i class="ti ti-package"></i></div>
+          <div>
+            <div class="srv-tile-label" style="font-weight:600">بکاپ کامل پروژه</div>
+            <div style="color:var(--t3);font-size:11.5px">دانلود کل سورس + تمام کانفیگ‌ها، برای انتقال به هاست بعدی</div>
+          </div>
+        </div>
+        <button class="pw-submit" style="background:linear-gradient(135deg,#2ecc71,#27ae60);box-shadow:0 6px 18px rgba(39,174,96,.32)" onclick="downloadBackup()" id="backup-btn"><i class="ti ti-download"></i> دانلود بکاپ کامل (سورس + کانفیگ‌ها)</button>
+      </div>
     </div>
     <div class="pw-panel">
       <div class="pw-hero">
@@ -1336,6 +1346,28 @@ async function authF(url,opts={}){
   const r=await fetch(url,opts);
   if(r.status===401){location.href='/login';throw new Error('unauthorized')}
   return r;
+}
+async function downloadBackup(){
+  const btn=document.getElementById('backup-btn');
+  const orig=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2" style="animation:spin 1s linear infinite"></i> در حال آماده‌سازی...';
+  try{
+    const r=await authF('/api/backup/download');
+    if(!r.ok)throw new Error('backup failed');
+    const blob=await r.blob();
+    const cd=r.headers.get('Content-Disposition')||'';
+    const m=cd.match(/filename="?([^"]+)"?/);
+    const fname=m?m[1]:`matix-backup-${Date.now()}.zip`;
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=fname;document.body.appendChild(a);a.click();a.remove();
+    URL.revokeObjectURL(url);
+    toast('بکاپ با موفقیت دانلود شد ✓','ok');
+  }catch(e){
+    toast('خطا در دانلود بکاپ','err');
+  }finally{
+    btn.disabled=false;btn.innerHTML=orig;
+  }
 }
 function setQuota(val,unit,el){
   document.getElementById('nl-val').value = val===0?'':val;

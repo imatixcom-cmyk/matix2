@@ -1,9 +1,11 @@
 import asyncio
+import io
 import json
 import os
 import hashlib
 import secrets
 import time
+import zipfile
 import aiofiles
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,7 +14,7 @@ from collections import deque, defaultdict
 from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect, Depends
-from fastapi.responses import Response, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import Response, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import httpx
@@ -26,6 +28,7 @@ IRAN_TZ = ZoneInfo("Asia/Tehran")
 app = FastAPI(title="Matix", docs_url=None, redoc_url=None)
 
 # ── Persistence ───────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent  # ریشه‌ی سورس پروژه، برای بکاپ کامل
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DATA_FILE = DATA_DIR / "matix_state.json"
 SECRET_FILE = DATA_DIR / "matix_secret.key"
@@ -481,6 +484,55 @@ async def api_change_password(request: Request, token=Depends(require_auth)):
     await save_state()
     log_activity("auth", "رمز عبور پنل تغییر کرد", "ok")
     return {"ok": True}
+
+# ── Backup / Migration ─────────────────────────────────────────────────────────
+# پکیج کامل: سورس پروژه (main.py, pages.py, telegram_bot.py, ...) + دیتای فعلی
+# (کانفیگ‌ها، رمز، تنظیمات ربات) از DATA_DIR — برای انتقال آسون به هاست بعدی
+# وقتی سرویس Railway فعلی تموم شد. کافیه zip رو extract کنی، دیتای پوشه‌ی data/
+# رو بریزی توی DATA_DIR جدید (یا یه Volume تازه)، و همون‌جا دوباره دیپلوی کنی —
+# همه‌ی کانفیگ‌ها و لینک‌ها و رمز پنل دقیقاً همونی می‌مونه که بود.
+_BACKUP_EXCLUDE_DIRS = {"__pycache__", ".git", "venv", ".venv", "node_modules", ".idea", ".vscode"}
+_BACKUP_EXCLUDE_SUFFIXES = {".pyc"}
+
+
+@app.get("/api/backup/download")
+async def download_backup(_=Depends(require_auth)):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # سورس پروژه
+        for path in BASE_DIR.rglob("*"):
+            if path.is_dir():
+                continue
+            rel = path.relative_to(BASE_DIR)
+            if any(part in _BACKUP_EXCLUDE_DIRS for part in rel.parts):
+                continue
+            if path.suffix in _BACKUP_EXCLUDE_SUFFIXES:
+                continue
+            zf.write(path, f"source/{rel}")
+        # دیتای فعلی (کانفیگ‌ها، secret، فروشگاه)
+        if DATA_DIR.exists():
+            for path in DATA_DIR.rglob("*"):
+                if path.is_file():
+                    zf.write(path, f"data/{path.relative_to(DATA_DIR)}")
+        readme = (
+            "راهنمای انتقال Matix به هاست جدید\n"
+            "──────────────────────────────────\n"
+            "۱) پوشه‌ی source/ رو به یه ریپوی گیت‌هاب جدید پوش کن (یا مستقیم دیپلوی کن).\n"
+            "۲) یه Volume دائمی روی مسیر DATA_DIR بساز و کل محتوای پوشه‌ی data/ رو توش بریز.\n"
+            "۳) متغیرهای محیطی رو دستی روی هاست جدید تنظیم کن (این‌ها داخل بکاپ نیستن):\n"
+            "   ADMIN_PASSWORD, SECRET_KEY (اختیاری – یه فایل matix_secret.key هم داخل data/ هست),\n"
+            "   TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, DATA_DIR, PUBLIC_DOMAIN (در صورت نیاز)\n"
+            "۴) بعد از دیپلوی، رمز پنل و تمام لینک‌ها/کانفیگ‌ها دقیقاً همونی می‌مونه که بود.\n"
+        )
+        zf.writestr("README-MIGRATION.txt", readme)
+    buf.seek(0)
+    filename = f"matix-backup-{datetime.now(IRAN_TZ).strftime('%Y%m%d-%H%M')}.zip"
+    log_activity("backup", "بکاپ کامل سورس و کانفیگ‌ها دانلود شد", "ok")
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 # ── Telegram Bot Settings ─────────────────────────────────────────────────────
 @app.get("/api/settings/telegram")
