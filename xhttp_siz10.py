@@ -30,6 +30,7 @@ from main import (
     is_link_allowed,
     is_ip_allowed,
     save_state,
+    schedule_save,
 )
 from relay_vless import parse_vless_header, check_and_use
 from speed_limit import throttle
@@ -338,7 +339,7 @@ async def _open_tcp_for_session(session_id: str, uuid: str, sess: dict, first_ch
     sess["downlink_task"] = asyncio.create_task(
         _pump_tcp_to_queue(session_id, uuid, reader, sess["down_q"])
     )
-    asyncio.create_task(save_state())
+    schedule_save()
 
 
 def _downstream_gen(sess: dict):

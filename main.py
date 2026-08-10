@@ -118,6 +118,32 @@ async def save_state():
         except Exception as e:
             logger.warning(f"Could not save state: {e}")
 
+# ذخیره‌سازی دسته‌ای (debounce) — فقط برای رویدادهای پرتکرار مثل وصل/قطع هر
+# اتصال VLESS استفاده می‌شه. به‌جای نوشتن کامل state روی دیسک به‌ازای هر
+# اتصال/قطعی (که با صدها کاربر هم‌زمان می‌تونه فشار I/O زیادی ایجاد کنه)،
+# چند فراخوانی نزدیک به هم رو در یک بازه‌ی کوتاه با هم ادغام می‌کنه و فقط یک
+# بار در پایان بازه ذخیره می‌کنه. داده‌ی نمایشی (حجم مصرفی، اتصالات و ...)
+# همیشه از حافظه (LINKS/connections) خونده می‌شه، پس این تاخیر هیچ تاثیری
+# روی داشبورد/لینک ساب نداره؛ فقط نوشتن روی دیسک (برای بازیابی بعد از
+# ری‌استارت) کمی به تاخیر می‌افته. در خاموش‌شدن عادی سرور (shutdown) هم یک
+# save_state فوری و کامل انجام می‌شه، پس دیتا در ری‌استارت‌های معمولی از بین
+# نمی‌ره؛ فقط در کرش ناگهانی وسط بازه‌ی تاخیر، آخرین چند ثانیه ممکنه ذخیره
+# نشده باشه.
+SAVE_DEBOUNCE_SECONDS = 8
+_save_debounce_task: "asyncio.Task | None" = None
+
+def schedule_save():
+    global _save_debounce_task
+    if _save_debounce_task is not None and not _save_debounce_task.done():
+        return
+    async def _delayed_save():
+        try:
+            await asyncio.sleep(SAVE_DEBOUNCE_SECONDS)
+            await save_state()
+        except Exception as e:
+            logger.warning(f"Debounced save failed: {e}")
+    _save_debounce_task = asyncio.create_task(_delayed_save())
+
 # ── In-memory state ───────────────────────────────────────────────────────────
 connections: dict = {}
 stats = {
