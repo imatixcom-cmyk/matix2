@@ -9,13 +9,22 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 import asyncio
+import io
 import json
 import os
+import random
 import re
 import time
 
 import aiofiles
 import httpx
+
+try:
+    import qrcode
+    _QR_AVAILABLE = True
+except Exception:
+    qrcode = None
+    _QR_AVAILABLE = False
 
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -30,6 +39,7 @@ from main import (
     fmt_bytes,
     is_link_allowed,
     logger,
+    log_activity,
     save_state,
     DATA_DIR,
     PROTOCOLS,
@@ -69,6 +79,7 @@ SHOP: dict = {
     "orders": {},               # order_id(str) -> order dict
     "order_seq": 0,
     "discount_codes": {},       # CODE(str) -> {"type":"percent"|"fixed","value":float,"active":bool,"max_uses":int,"used_count":int,"expires_at":str|None}
+    "gift_codes": {},           # CODE(str) -> {"amount":int,"active":bool,"max_uses":int,"used_count":int,"redeemed_by":[chat_id,...]}
     "announce_channel": "",     # آیدی عددی یا یوزرنیم کانال اعلان خرید، مثلاً @mychannel یا -100123456789
     "wallets": {},               # str(chat_id) -> موجودی کیف پول (تومان)
     "wallet_topups": {},         # topup_id(str) -> {"chat_id","amount","status","created_at","receipt_message_id"}
@@ -79,6 +90,11 @@ SHOP: dict = {
     "known_users": [],            # لیست همه‌ی chat_id هایی که تا حالا با ربات تعامل داشته‌اند
     "required_channel": "",       # آیدی عددی یا یوزرنیم کانالی که عضویت توش اجباریه (خالی = بدون محدودیت)
     "required_channel_url": "",   # لینک عضویت در همون کانال (برای دکمه)
+    "support_username": "",       # یوزرنیم پشتیبانی برای دکمه‌ی «پشتیبانی» (بدون @)
+    "channels": [],                # [{"name": "کانال اصلی", "url": "https://t.me/..."}]
+    "spins": {},                   # str(chat_id) -> تاریخ آخرین چرخش گردونه‌ی شانس (ISO date)
+    "spin_min": 2000,              # حداقل جایزه‌ی گردونه‌ی شانس (تومان)
+    "spin_max": 20000,             # حداکثر جایزه‌ی گردونه‌ی شانس (تومان)
 }
 
 async def _load_shop():
@@ -143,6 +159,28 @@ def _discount_desc(d: dict) -> str:
     if d.get("type") == "percent":
         return f"{d.get('value')}٪ تخفیف"
     return f"{int(d.get('value', 0)):,} تومان تخفیف"
+
+# ── کدهای هدیه (شارژ مستقیم کیف پول با مبلغ دلخواه) ─────────────────────────
+def _find_gift(code: str) -> dict | None:
+    if not code:
+        return None
+    return SHOP.get("gift_codes", {}).get(code.strip().upper())
+
+def _gift_valid_for(d: dict | None, chat_id: int) -> tuple[bool, str]:
+    if not d:
+        return False, "این کد هدیه وجود نداره."
+    if not d.get("active", True):
+        return False, "این کد هدیه غیرفعال شده."
+    if chat_id in d.get("redeemed_by", []):
+        return False, "قبلاً این کد رو استفاده کردی."
+    max_uses = d.get("max_uses", 0)
+    if max_uses and d.get("used_count", 0) >= max_uses:
+        return False, "ظرفیت استفاده از این کد تموم شده."
+    return True, ""
+
+def _gift_desc(d: dict) -> str:
+    max_uses = d.get("max_uses", 0) or "نامحدود"
+    return f"{int(d.get('amount', 0)):,} تومان — {d.get('used_count', 0)}/{max_uses} استفاده"
 
 # ── کیف پول ───────────────────────────────────────────────────────────────
 def _wallet_balance(chat_id: int) -> int:
@@ -267,25 +305,32 @@ T = {
         "fa": "به کنترل‌روم Matix خوش اومدی، کاپیتان 🧭\nاز میان گزینه‌های زیر انتخاب کن:",
         "en": "Welcome to the Matix control room, captain 🧭\nPick an option below:",
     },
-    "cust_home_title": {"fa": "💠 M A T I X", "en": "💠 M A T I X"},
+    "cust_home_title": {"fa": "<b>🕊️ به نام خدا</b>", "en": "<b>🕊️ In the name of God</b>"},
     "cust_home_sub": {
         "fa": (
-            "به نام خدا 🕊️\n\n"
             "به <b>Matix</b> خوش اومدی ✨\n"
-            "اینترنتِ آزاد، پرسرعت و پایدار — بدون قطعی، بدون دردسر 🚀\n\n"
+            "<b>اینترنتِ آزاد، پرسرعت و پایدار</b> — بدون قطعی، بدون دردسر 🚀\n\n"
             "🔹 هر حجم و هر مدتی که بخوای، با چند لمس بساز\n"
             "🔹 تحویل کاملاً خودکار و آنی بعد از تایید پرداخت\n"
             "🔹 پیش از خرید، یک کانفیگ تست رایگان بگیر\n\n"
-            "از منوی زیر شروع کن 👇"
+            "<b>از منوی زیر شروع کن 👇</b>"
         ),
         "en": (
             "Welcome to <b>Matix</b> ✨\n"
-            "Free, fast and stable internet — no drops, no hassle 🚀\n\n"
+            "<b>Free, fast and stable internet</b> — no drops, no hassle 🚀\n\n"
             "🔹 Any volume, any duration, built in a few taps\n"
             "🔹 Fully automatic, instant delivery after payment approval\n"
             "🔹 Grab a free trial before you buy\n\n"
-            "Start from the menu below 👇"
+            "<b>Start from the menu below 👇</b>"
         ),
+    },
+    "cust_home_sub_start": {
+        "fa": "به <b>Matix</b> خوش اومدی ✨",
+        "en": "Welcome back to <b>Matix</b> ✨",
+    },
+    "cust_home_sub_return": {
+        "fa": "<b>به صفحه‌ی اصلی برگشتی</b>؛ از منو ادامه بده 👇",
+        "en": "<b>Back to the home menu</b>; pick an option below 👇",
     },
     "btn_buy": {"fa": "🛒 خرید کانفیگ", "en": "🛒 Buy a Config"},
     "btn_trial": {"fa": "🎁 دریافت تست رایگان", "en": "🎁 Get Free Trial"},
@@ -304,6 +349,7 @@ T = {
     "btn_admin_orders": {"fa": "📥 سفارش‌های در انتظار", "en": "📥 Pending Orders"},
     "btn_admin_settings": {"fa": "⚙️ تنظیمات فروش", "en": "⚙️ Shop Settings"},
     "btn_admin_discounts": {"fa": "🏷 کدهای تخفیف", "en": "🏷 Discount Codes"},
+    "btn_admin_gifts": {"fa": "🎁 کدهای هدیه", "en": "🎁 Gift Codes"},
     "btn_admin_stats": {"fa": "📊 آمار و گزارش", "en": "📊 Stats & Reports"},
     "btn_admin_broadcast": {"fa": "📢 پیام همگانی", "en": "📢 Broadcast"},
     "btn_wallet": {"fa": "💰 کیف پول", "en": "💰 Wallet"},
@@ -396,14 +442,10 @@ async def _play_frames(chat_id: int, message_id: int, frames: list[str], final_t
     if final_text is not None:
         await _edit(chat_id, message_id, final_text, final_kb)
 
-async def _play_entry_animation(chat_id: int):
-    lg = _lg(chat_id)
-    r = await _send(chat_id, _ENTRY_FRAMES[lg][0])
-    message_id = (r or {}).get("result", {}).get("message_id")
-    if not message_id:
-        return
-    home_title, home_sub, kb = _home_view(chat_id)
-    await _play_frames(chat_id, message_id, _ENTRY_FRAMES[lg][1:], f"{home_title}\n\n{home_sub}", kb)
+async def _play_entry_animation(chat_id: int, is_new: bool = False):
+    """کاربر /start می‌زنه و بلافاصله منوی اصلی با همه‌ی دکمه‌ها میاد، بدون انیمیشن/تاخیر."""
+    home_title, home_sub, kb = _home_view(chat_id, mode="first" if is_new else "start")
+    await _send(chat_id, _join_ts(home_title, home_sub), kb)
 
 _client: httpx.AsyncClient | None = None
 _poll_task: asyncio.Task | None = None
@@ -437,20 +479,22 @@ def _share_url() -> str | None:
     return f"https://t.me/share/url?url=https://t.me/{_bot_username}&text={text}"
 
 async def _announce_purchase(order: dict):
-    """بعد از تایید سفارش، یه اعلان بدون‌هویت (بدون نام/کانفیگ مشتری) توی کانال تنظیم‌شده می‌فرسته."""
+    """بعد از تایید سفارش، یه اعلان توی کانال تنظیم‌شده می‌فرسته؛ هویت خریدار فقط نصفه (نصف آیدی/یوزرنیم) نشون داده می‌شه."""
     channel = SHOP.get("announce_channel")
     if not channel:
         return
     await _ensure_username_cached()
+    masked = _mask_identity(order.get("chat_id"), order.get("username"))
     text = (
         "🎉 <b>یک خرید تازه در Matix ثبت شد!</b>\n\n"
+        f"🙈 خریدار: <code>{masked}</code>\n"
         f"📦 حجم: <b>{order['volume_gb']} GB</b>\n"
         f"📅 مدت اعتبار: <b>{order['days']} روز</b>\n\n"
         "تو هم می‌تونی همین الان اینترنت آزاد و پرسرعتتو با چند لمس بسازی 👇"
     )
     kb = None
     if _bot_username:
-        kb = {"inline_keyboard": [[{"text": "🛒 من هم می‌خوام بخرم", "url": f"https://t.me/{_bot_username}?start=buy"}]]}
+        kb = {"inline_keyboard": [[_btn("🛒 من هم می‌خوام بخرم", url=f"https://t.me/{_bot_username}?start=buy", style="success")]]}
     await _call("sendMessage", chat_id=channel, text=text, parse_mode="HTML",
                 disable_web_page_preview=True, reply_markup=kb)
 
@@ -573,6 +617,40 @@ async def _edit(chat_id: int, message_id: int, text: str, kb: dict | None = None
     if res is None or not res.get("ok"):
         await _send(chat_id, text, kb)
 
+def _qr_png(data: str) -> bytes | None:
+    """یه تصویر QR-Code از یه رشته (مثلاً لینک ساب) می‌سازه و بایت‌های PNG رو برمی‌گردونه.
+    اگه کتابخونه‌ی qrcode روی سرور نصب نباشه، None برمی‌گردونه (بدون کرش کردن ربات)."""
+    if not _QR_AVAILABLE:
+        return None
+    try:
+        img = qrcode.make(data, box_size=9, border=3)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning(f"QR generation failed: {e}")
+        return None
+
+async def _send_photo_bytes(chat_id: int, photo_bytes: bytes, caption: str = "", kb: dict | None = None):
+    """آپلود مستقیم یه عکس (بایت‌های PNG) به تلگرام، برای ارسال QR-Code کانفیگ."""
+    if _client is None:
+        return None
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
+    if kb:
+        data["reply_markup"] = json.dumps(kb)
+    files = {"photo": ("config.png", photo_bytes, "image/png")}
+    try:
+        r = await _client.post(f"{API_BASE}/sendPhoto", data=data, files=files, timeout=40)
+        res = r.json()
+        if not res.get("ok"):
+            logger.warning(f"Telegram API sendPhoto failed: {res}")
+            await _send(chat_id, caption, kb)
+        return res
+    except Exception as e:
+        logger.warning(f"Telegram API sendPhoto error: {e}")
+        await _send(chat_id, caption, kb)
+        return None
+
 async def _answer_cb(cb_id: str, text: str = "", alert: bool = False):
     await _call("answerCallbackQuery", callback_query_id=cb_id, text=text, show_alert=alert)
 
@@ -587,39 +665,53 @@ async def _notify_admins(text: str, kb: dict | None = None):
         await _send(aid, text, kb)
 
 # ── Keyboards: Home (چیدمان کارتی/شبکه‌ای — دوستونه) ─────────────────────────
-def _home_view(chat_id: int):
+def _join_ts(title: str, sub: str) -> str:
+    """تایتل و زیرمتن رو به هم می‌چسبونه؛ اگه تایتل خالی باشه، فقط زیرمتن برمی‌گرده."""
+    return f"{title}\n\n{sub}" if title else sub
+
+def _home_view(chat_id: int, mode: str = "home"):
+    """mode: 'first' (اولین /start عمری کاربر، متن کامل)، 'start' (استارت‌های بعدی، کوتاه)،
+    'home' (بازگشت از یه زیرمنو با دکمه‌ی بازگشت، کوتاه‌ترین حالت، بدون تکرار بسم‌الله)."""
     if _is_admin(chat_id):
         title = _t(chat_id, "admin_home_title")
         sub = _t(chat_id, "admin_home_sub")
         n_pending = sum(1 for o in SHOP["orders"].values() if o["status"] == "pending")
         orders_label = _t(chat_id, "btn_admin_orders") + (f" ({n_pending})" if n_pending else "")
         kb = {"inline_keyboard": [
-            [{"text": _t(chat_id, "btn_admin_manage"), "callback_data": "list:0"},
-             {"text": _t(chat_id, "btn_admin_new"), "callback_data": "newcfg"}],
-            [{"text": orders_label, "callback_data": "orders:0"},
-             {"text": _t(chat_id, "btn_admin_settings"), "callback_data": "settings"}],
-            [{"text": _t(chat_id, "btn_check_usage"), "callback_data": "usage:start"},
-             {"text": _t(chat_id, "btn_admin_stats"), "callback_data": "stats:home"}],
-            [{"text": _t(chat_id, "btn_admin_broadcast"), "callback_data": "bcast:start"}],
-            [{"text": _t(chat_id, "btn_refresh"), "callback_data": "home"},
-             {"text": _t(chat_id, "btn_lang"), "callback_data": "lang:toggle"}],
+            [_btn(_t(chat_id, "btn_admin_manage"), "list:0", style="primary"),
+             _btn(_t(chat_id, "btn_admin_new"), "newcfg", style="success")],
+            [_btn(orders_label, "orders:0", style="danger" if n_pending else "primary"),
+             _btn(_t(chat_id, "btn_admin_settings"), "settings", style="primary")],
+            [_btn(_t(chat_id, "btn_check_usage"), "usage:start", style="primary"),
+             _btn(_t(chat_id, "btn_admin_stats"), "stats:home", style="primary")],
+            [_btn(f"👥 کاربران ربات ({len(SHOP.get('known_users', []))})", "users:count", style="primary")],
+            [_btn(_t(chat_id, "btn_admin_broadcast"), "bcast:start", style="primary")],
+            [_btn(_t(chat_id, "btn_refresh"), "home", style="success"),
+             _btn(_t(chat_id, "btn_lang"), "lang:toggle", style="primary")],
         ]}
     else:
         title = _t(chat_id, "cust_home_title")
-        sub = _t(chat_id, "cust_home_sub")
+        if mode == "first":
+            sub = _t(chat_id, "cust_home_sub")
+        elif mode == "start":
+            sub = _t(chat_id, "cust_home_sub_start")
+        else:
+            sub = _t(chat_id, "cust_home_sub_return")
         wallet_label = _t(chat_id, "btn_wallet") + f" ({_wallet_balance(chat_id):,}ت)"
         rows = [
-            [{"text": _t(chat_id, "btn_buy"), "callback_data": "buy:start"},
-             {"text": _t(chat_id, "btn_trial"), "callback_data": "trial:claim"}],
-            [{"text": _t(chat_id, "btn_myconfigs"), "callback_data": "mine:0"},
-             {"text": _t(chat_id, "btn_check_usage"), "callback_data": "usage:start"}],
-            [{"text": wallet_label, "callback_data": "wallet:home"},
-             {"text": _t(chat_id, "btn_referral"), "callback_data": "ref:home"}],
-            [{"text": _t(chat_id, "btn_help"), "callback_data": "help"}],
+            [_btn(_t(chat_id, "btn_buy"), "buy:start", style="success"),
+             _btn("📢 کانال‌های ما", "channels:home", style="success")],
+            [_btn(_t(chat_id, "btn_trial"), "trial:claim", style="success"),
+             _btn("🎲 گردونه شانس", "spin:go", style="success")],
+            [_btn("🛍️ سرویس‌های من", "mine:0", style="danger"),
+             _btn(wallet_label, "wallet:home", style="success")],
+            [_btn(_t(chat_id, "btn_referral") or "👥 زیر مجموعه‌گیری", "ref:home", style="primary"),
+             _btn(_t(chat_id, "btn_help") or "📚 آموزش", "help", style="primary")],
+            [_btn("🧑‍💼 درخواست نمایندگی", "reseller:request", style="success")],
         ]
-        rows.append([{"text": _t(chat_id, "btn_lang"), "callback_data": "lang:toggle"}])
         kb = {"inline_keyboard": rows}
     return title, sub, kb
+
 
 def _links_list_kb(chat_id: int, page: int):
     items = sorted(LINKS.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
@@ -800,6 +892,48 @@ def _format_detail(uid: str, l: dict) -> str:
         f"UUID: <code>{uid}</code>"
     )
 
+def _format_detail_simple(l: dict, vless: str = "") -> str:
+    """نمای ساده‌ی کانفیگ برای مشتری — بدون UUID/پورت/پروتکل، فقط اطلاعات ضروری + متن vless قابل کپی."""
+    status = "🟢 فعال" if is_link_allowed(l) else "🔴 غیرفعال/منقضی"
+    limit = "نامحدود" if not l.get("limit_bytes") else fmt_bytes(l["limit_bytes"])
+    exp = l.get("expires_at")
+    exp_txt = exp.split("T")[0] if exp else "بدون انقضا"
+    txt = (
+        f"<b>{l.get('label','?')}</b>\n"
+        f"وضعیت: {status}\n"
+        f"مصرف: {fmt_bytes(l.get('used_bytes',0))} / {limit}\n"
+        f"انقضا: {exp_txt}"
+    )
+    if vless:
+        txt += (
+            "\n\n📎 متن اتصال (روی متن بزن تا کپی بشه، بعد توی v2Box وارد کن):\n"
+            f"<code>{vless}</code>\n\n"
+            "یا کد QR بالا رو مستقیم با v2Box اسکن کن 📱🙏"
+        )
+    return txt
+
+def _link_detail_kb_customer(chat_id: int, uid: str):
+    return {"inline_keyboard": [
+        [_btn("📲 دانلود v2Box", url=V2BOX_URL, style="success")],
+        [_btn(_t(chat_id, "btn_renew"), f"renew:start:{uid}", style="primary")],
+        [_btn(_t(chat_id, "btn_back_list"), "mine:0", style="primary")],
+    ]}
+
+async def _deliver_config(chat_id: int, message_id: int | None, uid: str, l: dict, prefix: str = ""):
+    """کانفیگ رو برای مشتری، هرچه سریع‌تر، با QR-Code از خودِ vless (نه لینک ساب) + متن vless
+    قابل کپی و دکمه‌های رنگی ارسال می‌کنه. اگه یه پیام انیمیشن در جریان باشه (message_id)،
+    همزمان با ارسال QR بسته می‌شه تا معطلی نداشته باشه."""
+    host = get_host()
+    vless = vless_link_for_link(l, uid, host)
+    caption = (f"{prefix}\n\n" if prefix else "") + _format_detail_simple(l, vless)
+    kb = _link_detail_kb_customer(chat_id, uid)
+    photo = _qr_png(vless)
+    send_coro = _send_photo_bytes(chat_id, photo, caption, kb) if photo else _send(chat_id, caption, kb)
+    if message_id:
+        await asyncio.gather(send_coro, _edit(chat_id, message_id, prefix or "✅ کانفیگت آماده شد!"))
+    else:
+        await send_coro
+
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 def _extract_uid_from_text(text: str) -> str | None:
@@ -853,6 +987,27 @@ def _buyer_line(chat_id: int, username: str | None) -> str:
     looks_like_username = bool(username) and " " not in username and username.replace("_", "").isalnum()
     display = f"@{username}" if looks_like_username else (username or str(chat_id))
     return f"👤 {display} — <code>{chat_id}</code> — <a href=\"tg://user?id={chat_id}\">مشاهده پروفایل</a>"
+
+def _mask_identity(chat_id: int, username: str | None) -> str:
+    """هویت خریدار رو نصفه‌پنهون می‌کنه (برای گزارش‌های عمومی کانال) — نیمی از آیدی/یوزرنیم معلومه، بقیه ستاره."""
+    looks_like_username = bool(username) and " " not in username and username.replace("_", "").isalnum()
+    if looks_like_username:
+        keep = max(1, len(username) // 2)
+        return "@" + username[:keep] + "•" * max(1, len(username) - keep)
+    s = str(chat_id)
+    keep = max(2, len(s) // 2)
+    return s[:keep] + "•" * (len(s) - keep)
+
+def _btn(text: str, cb: str | None = None, url: str | None = None, style: str | None = None) -> dict:
+    """یه دکمه‌ی این‌لاین می‌سازه؛ style یکی از success/primary/destructive (Bot API 9.4+) برای دکمه‌ی رنگی."""
+    b: dict = {"text": text}
+    if cb is not None:
+        b["callback_data"] = cb
+    if url is not None:
+        b["url"] = url
+    if style:
+        b["style"] = style
+    return b
 
 def _order_summary(order: dict) -> str:
     code_line = f"کد تخفیف: {order.get('discount_code')}\n" if order.get("discount_code") else ""
@@ -915,8 +1070,12 @@ def _settings_kb(chat_id: int):
         [{"text": f"🔒 کانال اجباری: {SHOP.get('required_channel') or '—'}", "callback_data": "set:required_channel"},
          {"text": f"🔗 لینک عضویت", "callback_data": "set:required_channel_url"}],
         [{"text": f"🤝 پاداش رفرال: {SHOP.get('referral_bonus', 0):,}ت", "callback_data": "set:referral_bonus"}],
+        [{"text": f"☎️ یوزرنیم پشتیبانی: {SHOP.get('support_username') or '—'}", "callback_data": "set:support_username"}],
+        [{"text": f"📢 کانال‌های ما ({len(SHOP.get('channels', []))} مورد)", "callback_data": "set:channels"}],
+        [{"text": f"🎲 جایزه گردونه: {SHOP.get('spin_min', 0):,}–{SHOP.get('spin_max', 0):,}ت", "callback_data": "set:spin_range"}],
         [{"text": f"💰 مبالغ پیشنهادی شارژ کیف پول: {', '.join(f'{int(a):,}' for a in SHOP.get('wallet_topup_presets', []))}", "callback_data": "set:wallet_topup_presets"}],
-        [{"text": _t(chat_id, "btn_admin_discounts"), "callback_data": "discounts:0"}],
+        [{"text": _t(chat_id, "btn_admin_discounts"), "callback_data": "discounts:0"},
+         {"text": _t(chat_id, "btn_admin_gifts"), "callback_data": "giftcodes:0"}],
         [{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}],
     ]}
 
@@ -940,6 +1099,66 @@ def _discounts_list_kb(chat_id: int, page: int):
     rows.append([{"text": _t(chat_id, "btn_discount_new"), "callback_data": "disc:new"}])
     rows.append([{"text": _t(chat_id, "btn_back_home"), "callback_data": "settings"}])
     return {"inline_keyboard": rows}, total
+
+# ── کدهای هدیه: کیبوردها و متن‌ها ──────────────────────────────────────────
+def _giftcodes_list_kb(chat_id: int, page: int):
+    codes = sorted(SHOP.get("gift_codes", {}).items())
+    total = len(codes)
+    start = page * PAGE_SIZE
+    chunk = codes[start:start + PAGE_SIZE]
+    rows = []
+    for code, d in chunk:
+        dot = "🟢" if d.get("active", True) else "🔴"
+        rows.append([{"text": f"{dot} {code} — {_gift_desc(d)}", "callback_data": f"gift:view:{code}"}])
+    nav = []
+    if start > 0:
+        nav.append({"text": _t(chat_id, "btn_prev"), "callback_data": f"giftcodes:{page-1}"})
+    if start + PAGE_SIZE < total:
+        nav.append({"text": _t(chat_id, "btn_next"), "callback_data": f"giftcodes:{page+1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "➕ کد هدیه جدید", "callback_data": "gift:new"}])
+    rows.append([{"text": _t(chat_id, "btn_back_home"), "callback_data": "settings"}])
+    return {"inline_keyboard": rows}, total
+
+def _giftcode_detail_kb(chat_id: int, code: str, active: bool):
+    return {"inline_keyboard": [
+        [{"text": ("⛔ غیرفعال‌سازی" if active else "✅ فعال‌سازی"), "callback_data": f"gift:toggle:{code}"}],
+        [{"text": "🗑 حذف کد", "callback_data": f"gift:del:{code}"}],
+        [{"text": "⬅ بازگشت به لیست", "callback_data": "giftcodes:0"}],
+    ]}
+
+def _giftcode_detail_text(code: str, d: dict) -> str:
+    status = "🟢 فعال" if d.get("active", True) else "🔴 غیرفعال"
+    max_uses = d.get("max_uses", 0) or "نامحدود"
+    return (
+        f"🎁 <b>{code}</b>\n"
+        f"وضعیت: {status}\n"
+        f"مبلغ: <b>{int(d.get('amount', 0)):,} تومان</b>\n"
+        f"دفعات استفاده: {d.get('used_count', 0)} / {max_uses}"
+    )
+
+def _giftcode_unlimited_kb(chat_id: int):
+    return {"inline_keyboard": [
+        [{"text": "♾ نامحدود", "callback_data": "gift:skip:maxuses"}],
+        [{"text": _t(chat_id, "btn_cancel"), "callback_data": "gift:cancel"}],
+    ]}
+
+def _giftcode_confirm_kb(chat_id: int):
+    return {"inline_keyboard": [
+        [{"text": "✅ ساخت کد هدیه", "callback_data": "gift:confirm"}],
+        [{"text": _t(chat_id, "btn_cancel"), "callback_data": "gift:cancel"}],
+    ]}
+
+def _giftcode_summary(data: dict) -> str:
+    max_uses = data.get("max_uses", 0) or "نامحدود"
+    return (
+        "🎁 خلاصه‌ی کد هدیه — تایید کن:\n\n"
+        f"کد: <b>{data.get('code')}</b>\n"
+        f"مبلغ: <b>{int(data.get('amount', 0)):,} تومان</b>\n"
+        f"حداکثر تعداد استفاده: {max_uses}"
+    )
+
 
 def _discount_detail_kb(chat_id: int, code: str, active: bool):
     return {"inline_keyboard": [
@@ -998,9 +1217,12 @@ async def _handle_message(msg: dict):
         return
 
     known = SHOP.setdefault("known_users", [])
-    if chat_id not in known:
+    is_new_user = chat_id not in known
+    if is_new_user:
         known.append(chat_id)
         await _save_shop()
+        who = f"@{username}" if username and " " not in username else (username or str(chat_id))
+        log_activity("telegram", f"👤 کاربر جدید وارد ربات شد: {who} ({chat_id}) — مجموع کاربران: {len(known)}", "ok")
 
     if text.startswith("/start"):
         _pending.pop(chat_id, None)
@@ -1026,7 +1248,7 @@ async def _handle_message(msg: dict):
             _pending[chat_id] = {"action": "buy", "step": "volume", "data": {}}
             await _send(chat_id, "📦 چند گیگابایت حجم می‌خوای؟ فقط عدد رو بفرست، مثلاً <code>20</code>:", _buy_cancel_kb(chat_id))
             return
-        await _play_entry_animation(chat_id)
+        await _play_entry_animation(chat_id, is_new=is_new_user)
         return
 
     if not await _passes_membership_gate(chat_id):
@@ -1037,14 +1259,14 @@ async def _handle_message(msg: dict):
         _pending.pop(chat_id, None)
         await _ensure_username_cached()
         await _send_sticker(chat_id, "welcome")
-        await _play_entry_animation(chat_id)
+        await _play_entry_animation(chat_id, is_new=False)
         return
 
     if text == "/cancel":
         _pending.pop(chat_id, None)
         await _send(chat_id, _t(chat_id, "cancelled"))
         title, sub, kb = _home_view(chat_id)
-        await _send(chat_id, f"{title}\n\n{sub}", kb)
+        await _send(chat_id, _join_ts(title, sub), kb)
         return
 
     pending = _pending.get(chat_id)
@@ -1332,6 +1554,66 @@ async def _handle_message(msg: dict):
                 await _send(chat_id, _discount_summary(wdata), _discount_confirm_kb(chat_id))
                 return
 
+    # ── ساخت کد هدیه (ادمین) ────────────────────────────────────────────────
+    if pending and pending.get("action") == "gift_wizard" and text:
+        if not _is_admin(chat_id):
+            _pending.pop(chat_id, None)
+        else:
+            step = pending["step"]
+            wdata = pending["data"]
+
+            if step == "code":
+                code = text.strip().upper().replace(" ", "")
+                if not code or len(code) > 30:
+                    await _send(chat_id, "❗️ یه کد معتبر بفرست (حداکثر ۳۰ کاراکتر):")
+                    return
+                if code in SHOP.get("gift_codes", {}):
+                    await _send(chat_id, "❗️ این کد قبلاً وجود داره. یه کد دیگه بفرست:")
+                    return
+                wdata["code"] = code
+                pending["step"] = "amount"
+                await _send(chat_id, "💰 مبلغ هدیه رو به تومان بفرست (هر عددی که بخوای):")
+                return
+
+            if step == "amount":
+                n = _parse_nonneg_int(text)
+                if n is None or n <= 0:
+                    await _send(chat_id, "❗️ یه عدد صحیح و بزرگ‌تر از صفر بفرست:")
+                    return
+                wdata["amount"] = n
+                pending["step"] = "maxuses"
+                await _send(chat_id, "🔢 حداکثر تعداد دفعات استفاده رو بفرست (عدد صحیح)، یا نامحدود رو بزن:", _giftcode_unlimited_kb(chat_id))
+                return
+
+            if step == "maxuses":
+                n = _parse_nonneg_int(text)
+                if n is None:
+                    await _send(chat_id, "❗️ یه عدد صحیح بفرست:", _giftcode_unlimited_kb(chat_id))
+                    return
+                wdata["max_uses"] = n
+                pending["step"] = "confirm"
+                await _send(chat_id, _giftcode_summary(wdata), _giftcode_confirm_kb(chat_id))
+                return
+
+    # ── دریافت کد هدیه (مشتری) ────────────────────────────────────────────
+    if pending and pending.get("action") == "gift_redeem" and text:
+        _pending.pop(chat_id, None)
+        code = text.strip().upper().replace(" ", "")
+        d = _find_gift(code)
+        ok, reason = _gift_valid_for(d, chat_id)
+        if not ok:
+            await _send(chat_id, f"❌ {reason}", {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "wallet:home"}]]})
+            return
+        amount = int(d["amount"])
+        wallets = SHOP.setdefault("wallets", {})
+        wallets[str(chat_id)] = int(wallets.get(str(chat_id), 0)) + amount
+        d["used_count"] = d.get("used_count", 0) + 1
+        d.setdefault("redeemed_by", []).append(chat_id)
+        await _save_shop()
+        await _send(chat_id, f"🎉 کد هدیه با موفقیت اعمال شد! <b>{amount:,} تومان</b> به کیف پولت اضافه شد.\n\n💰 موجودی فعلی: <b>{_wallet_balance(chat_id):,} تومان</b>",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "wallet:home"}]]})
+        return
+
     # ── مراحل ساخت دستی (ادمین) ─────────────────────────────────────────────
     if pending and pending.get("action") == "admin_wizard" and text:
         if not _is_admin(chat_id):
@@ -1411,6 +1693,12 @@ async def _handle_message(msg: dict):
                 return
 
     # ── ورودی تنظیمات فروش (ادمین) ──────────────────────────────────────────
+    if pending and pending.get("action") == "support_msg" and text:
+        _pending.pop(chat_id, None)
+        await _notify_admins(f"☎️ <b>پیام پشتیبانی از مشتری:</b>\n\n{_buyer_line(chat_id, username)}\n\n💬 {text}")
+        await _send(chat_id, "✅ پیامت برای پشتیبانی ارسال شد؛ به‌زودی جواب می‌گیری.")
+        return
+
     if pending and pending.get("action") == "set_value" and text and _is_admin(chat_id):
         field = pending["field"]
         if field in ("price_per_gb", "price_per_day", "min_price"):
@@ -1445,6 +1733,32 @@ async def _handle_message(msg: dict):
                 await _send(chat_id, "❗️ یه عدد صحیح (تومان) بفرست:")
                 return
             SHOP[field] = n
+        elif field == "support_username":
+            SHOP[field] = text.strip().lstrip("@")[:64]
+        elif field == "channels":
+            chans = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                name, url = line.split("|", 1)
+                name, url = name.strip(), url.strip()
+                if name and url.startswith("http"):
+                    chans.append({"name": name[:40], "url": url})
+            if not chans:
+                await _send(chat_id, "❗️ فرمت درست نبود. هر خط باید «اسم | لینک» باشه:")
+                return
+            SHOP[field] = chans
+        elif field == "spin_range":
+            parts = [p.strip() for p in re.split(r"[,\n]+", text) if p.strip()]
+            if len(parts) != 2:
+                await _send(chat_id, "❗️ دو عدد با کاما بفرست، مثال: <code>2000,20000</code>")
+                return
+            lo, hi = _parse_nonneg_int(parts[0]), _parse_nonneg_int(parts[1])
+            if lo is None or hi is None or lo <= 0 or hi < lo:
+                await _send(chat_id, "❗️ مقادیر نامعتبرن. مثال: <code>2000,20000</code>")
+                return
+            SHOP["spin_min"], SHOP["spin_max"] = lo, hi
         elif field == "wallet_topup_presets":
             parts = [p.strip() for p in re.split(r"[,\n]+", text) if p.strip()]
             amounts = []
@@ -1481,7 +1795,7 @@ async def _handle_message(msg: dict):
 
     # پیام ناشناخته → صفحه‌ی اصلی رو نشون بده
     title, sub, kb = _home_view(chat_id)
-    await _send(chat_id, f"{title}\n\n{sub}", kb)
+    await _send(chat_id, _join_ts(title, sub), kb)
 
 async def _handle_callback(cb: dict):
     chat_id = cb.get("message", {}).get("chat", {}).get("id")
@@ -1497,7 +1811,7 @@ async def _handle_callback(cb: dict):
     if data == "checkjoin":
         if await _passes_membership_gate(chat_id):
             title, sub, kb = _home_view(chat_id)
-            await _edit(chat_id, message_id, f"✅ عضویت تایید شد!\n\n{title}\n\n{sub}", kb)
+            await _edit(chat_id, message_id, f"✅ عضویت تایید شد!\n\n" + _join_ts(title, sub), kb)
         else:
             await _answer_cb(cb_id, "هنوز عضو کانال نشدی 🙁", alert=True)
         return
@@ -1509,13 +1823,13 @@ async def _handle_callback(cb: dict):
     if data == "lang:toggle":
         _toggle_lang(chat_id)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, _join_ts(title, sub), kb)
         return
 
     if data == "home":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, _join_ts(title, sub), kb)
         return
 
     if data == "help":
@@ -1524,6 +1838,73 @@ async def _handle_callback(cb: dict):
             [{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}],
         ]}
         await _edit(chat_id, message_id, _t(chat_id, "help_text"), v2box_kb)
+        return
+
+    # ── گردونه‌ی شانس (یک‌بار در روز، جایزه‌ی نقدی به کیف پول) ──────────────
+    if data == "spin:go":
+        today = datetime.now().date().isoformat()
+        spins = SHOP.setdefault("spins", {})
+        if spins.get(str(chat_id)) == today:
+            await _answer_cb(cb_id, "🎲 امروز یه بار چرخوندی! فردا دوباره سر بزن 🌟", alert=True)
+            return
+        lo, hi = int(SHOP.get("spin_min", 2000)), int(SHOP.get("spin_max", 20000))
+        step = max(1, (hi - lo) // 1000)
+        prize = lo + random.randint(0, step) * 1000
+        spins[str(chat_id)] = today
+        wallets = SHOP.setdefault("wallets", {})
+        wallets[str(chat_id)] = int(wallets.get(str(chat_id), 0)) + prize
+        await _save_shop()
+        for frame in ["🎡 در حال چرخش گردونه", "🎡 در حال چرخش گردونه.", "🎡 در حال چرخش گردونه..", "🎡 در حال چرخش گردونه..."]:
+            await _edit(chat_id, message_id, frame)
+            await asyncio.sleep(0.35)
+        title, sub, kb = _home_view(chat_id)
+        await _edit(chat_id, message_id,
+                     f"🎉 تبریک! گردونه <b>{prize:,} تومان</b> جایزه داد و به کیف پولت اضافه شد!\n\n" + _join_ts(title, sub), kb)
+        return
+
+    # ── تعرفه‌ی اشتراک‌ها (چند نمونه‌ی محاسبه‌شده از فرمول قیمت‌گذاری) ──────────
+    if data == "tariff:home":
+        pergb, perday, minp = SHOP.get("price_per_gb", 0), SHOP.get("price_per_day", 0), SHOP.get("min_price", 0)
+        lines = [
+            "💰 <b>تعرفه‌ی اشتراک‌های Matix</b>\n",
+            f"نرخ پایه: هر گیگ <b>{pergb:,}</b> تومان + هر روز <b>{perday:,}</b> تومان (حداقل سفارش {minp:,} تومان)\n",
+        ]
+        for gb, days in [(10, 30), (20, 30), (30, 30), (50, 60), (100, 90)]:
+            lines.append(f"📦 {gb} گیگ / {days} روز — <b>{_price_for(gb, days):,} تومان</b>")
+        lines.append("\nهر ترکیب دلخواهی از حجم و مدت رو هم می‌تونی از «خرید اشتراک» بسازی 👇")
+        kb = {"inline_keyboard": [
+            [_btn(_t(chat_id, "btn_buy"), "buy:start", style="success")],
+            [_btn(_t(chat_id, "btn_back_home"), "home")],
+        ]}
+        await _edit(chat_id, message_id, "\n".join(lines), kb)
+        return
+
+    # ── پشتیبانی ───────────────────────────────────────────────────────────
+    if data == "support:home":
+        uname = (SHOP.get("support_username") or "").lstrip("@")
+        rows = []
+        if uname:
+            rows.append([_btn("💬 گفتگو با پشتیبانی", url=f"https://t.me/{uname}", style="primary")])
+            txt = "☎️ <b>پشتیبانی Matix</b>\n\nبرای ارتباط مستقیم با پشتیبانی روی دکمه‌ی زیر بزن."
+        else:
+            txt = "☎️ <b>پشتیبانی Matix</b>\n\nپیامت رو همین‌جا بفرست تا مستقیم به تیم پشتیبانی ارسال بشه."
+            _pending[chat_id] = {"action": "support_msg"}
+        rows.append([_btn(_t(chat_id, "btn_back_home"), "home")])
+        await _edit(chat_id, message_id, txt, {"inline_keyboard": rows})
+        return
+
+    # ── درخواست نمایندگی ──────────────────────────────────────────────────
+    if data == "reseller:request":
+        await _notify_admins(f"🧑‍💼 <b>درخواست نمایندگی جدید!</b>\n\n{_buyer_line(chat_id, username)}\n\nبرای بررسی و هماهنگی باهاش در تماس باش.")
+        await _answer_cb(cb_id, "✅ درخواستت برای تیم ادمین ارسال شد؛ به‌زودی باهات تماس می‌گیریم.", alert=True)
+        return
+
+    # ── تعداد کاربران ربات (فقط ادمین) ─────────────────────────────────────
+    if data == "users:count":
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        await _answer_cb(cb_id, f"👥 تعداد کل کاربران ربات: {len(SHOP.get('known_users', []))}", alert=True)
         return
 
     # ── استعلام حجم کانفیگ (دکمه‌ی جدا) ─────────────────────────────────────
@@ -1536,7 +1917,7 @@ async def _handle_callback(cb: dict):
     if data == "usage:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     # ── مشاهده‌ی جزئیات یک کانفیگ (مشترک بین ادمین/مشتری، با محدودیت دسترسی) ──
@@ -1550,7 +1931,10 @@ async def _handle_callback(cb: dict):
         if not _is_admin(chat_id) and l.get("owner_chat_id") != chat_id:
             await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
             return
-        await _edit(chat_id, message_id, _format_detail(uid, l), _link_detail_kb(chat_id, uid, l["active"]))
+        if _is_admin(chat_id):
+            await _edit(chat_id, message_id, _format_detail(uid, l), _link_detail_kb(chat_id, uid, l["active"]))
+        else:
+            await _deliver_config(chat_id, message_id, uid, l, "📦 جزئیات کانفیگت:")
         return
 
     if data.startswith("link:"):
@@ -1606,11 +1990,7 @@ async def _handle_callback(cb: dict):
         SHOP.setdefault("trial_used", []).append(chat_id)
         await _save_shop()
         await save_state()
-        await _edit(
-            chat_id, message_id,
-            "🎉 کانفیگ تست رایگانت آماده شد!\n\n" + _format_detail(uid, link),
-            _link_detail_kb(chat_id, uid, link["active"]),
-        )
+        await _deliver_config(chat_id, message_id, uid, link, "🎉 کانفیگ تست رایگانت آماده شد!")
         await _send_sticker(chat_id, "gift")
         return
 
@@ -1623,7 +2003,7 @@ async def _handle_callback(cb: dict):
     if data == "buy:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     if data == "buy:discount":
@@ -1698,14 +2078,23 @@ async def _handle_callback(cb: dict):
         await save_state()
         await _save_shop()
         _pending.pop(chat_id, None)
-        await _edit(
-            chat_id, message_id,
-            "✅ مبلغ از کیف پولت کسر شد و کانفیگت آماده شد!\n\n" + _format_detail(uid, link),
-            _link_detail_kb(chat_id, uid, link["active"]),
-        )
+        await _deliver_config(chat_id, message_id, uid, link, "✅ مبلغ از کیف پولت کسر شد و کانفیگت آماده شد!")
         await _send_sticker(chat_id, "success")
         await _announce_purchase(order)
         await _reward_referrer_if_first_order(order)
+        return
+
+    # ── کانال‌های ما ─────────────────────────────────────────────────────────
+    if data == "channels:home":
+        chans = SHOP.get("channels", [])
+        if not chans:
+            txt = "📢 فعلاً کانالی ثبت نشده."
+            rows = []
+        else:
+            txt = "📢 <b>کانال‌های Matix</b>\n\nحتماً عضو بشو تا از اخبار و آفرها جا نمونی 👇"
+            rows = [[_btn(c["name"], url=c["url"], style="primary")] for c in chans]
+        rows.append([_btn(_t(chat_id, "btn_back_home"), "home", style="success")])
+        await _edit(chat_id, message_id, txt, {"inline_keyboard": rows})
         return
 
     # ── کیف پول ──────────────────────────────────────────────────────────────
@@ -1713,8 +2102,9 @@ async def _handle_callback(cb: dict):
         balance = _wallet_balance(chat_id)
         txt = f"💰 <b>کیف پول Matix</b>\n\nموجودی فعلی: <b>{balance:,} تومان</b>"
         kb = {"inline_keyboard": [
-            [{"text": "➕ شارژ کیف پول", "callback_data": "wallet:topup:start"}],
-            [{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}],
+            [_btn("➕ شارژ کیف پول", "wallet:topup:start", style="success")],
+            [_btn("🎁 کد هدیه دارم", "gift:redeem:start", style="success")],
+            [_btn(_t(chat_id, "btn_back_home"), "home", style="primary")],
         ]}
         await _edit(chat_id, message_id, txt, kb)
         return
@@ -1760,7 +2150,7 @@ async def _handle_callback(cb: dict):
     if data == "wallet:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     if data.startswith("wt:appr:") or data.startswith("wt:rej:"):
@@ -1825,7 +2215,7 @@ async def _handle_callback(cb: dict):
     if data == "renew:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     if data == "renew:pay:wallet" or data == "renew:pay:card":
@@ -1843,11 +2233,7 @@ async def _handle_callback(cb: dict):
             await save_state()
             await _save_shop()
             _pending.pop(chat_id, None)
-            await _edit(
-                chat_id, message_id,
-                "✅ مبلغ از کیف پولت کسر شد و کانفیگت تمدید شد!\n\n" + _format_detail(uid, link),
-                _link_detail_kb(chat_id, uid, link["active"]),
-            )
+            await _deliver_config(chat_id, message_id, uid, link, "✅ مبلغ از کیف پولت کسر شد و کانفیگت تمدید شد!")
             await _send_sticker(chat_id, "success")
             return
         pending["step"] = "receipt"
@@ -1886,7 +2272,7 @@ async def _handle_callback(cb: dict):
     if data == "bcast:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     # ── بخش ادمین: لیست کامل کانفیگ‌ها ──────────────────────────────────────
@@ -1994,11 +2380,7 @@ async def _handle_callback(cb: dict):
                 order["uid"] = uid
                 await save_state()
                 await _save_shop()
-                await _send(
-                    order["chat_id"],
-                    "✅ تمدید تایید شد و کانفیگت بروزرسانی شد!\n\n" + _format_detail(uid, link),
-                    _link_detail_kb(order["chat_id"], uid, link["active"]),
-                )
+                await _deliver_config(order["chat_id"], None, uid, link, "✅ تمدید تایید شد و کانفیگت بروزرسانی شد!")
                 await _send_sticker(order["chat_id"], "success")
                 await _edit(chat_id, message_id, "✅ تمدید تایید و اعمال شد.\n\n" + _order_summary(order))
                 return
@@ -2023,11 +2405,7 @@ async def _handle_callback(cb: dict):
             mid = (r or {}).get("result", {}).get("message_id")
             if mid:
                 await _play_frames(order["chat_id"], mid, _GEN_FRAMES[_lg(order["chat_id"])])
-            await _send(
-                order["chat_id"],
-                "✅ کانفیگت آماده شد!\n\n" + _format_detail(uid, link),
-                _link_detail_kb(order["chat_id"], uid, link["active"]),
-            )
+            await _deliver_config(order["chat_id"], None, uid, link, "✅ کانفیگت آماده شد!")
             await _send_sticker(order["chat_id"], "success")
             await _announce_purchase(order)
             await _reward_referrer_if_first_order(order)
@@ -2072,6 +2450,9 @@ async def _handle_callback(cb: dict):
             ),
             "required_channel_url": "🔗 لینک عضویت در کانال اجباری رو بفرست (مثلاً https://t.me/mychannel):",
             "referral_bonus": "🤝 مبلغ پاداش رفرال (تومان) که بعد از اولین خرید هر زیرمجموعه به معرفش داده می‌شه رو بفرست:",
+            "support_username": "☎️ یوزرنیم تلگرام پشتیبانی رو بفرست (بدون @)، مثلاً <code>matix_support</code>:",
+            "channels": "📢 لیست کانال‌ها رو بفرست، هر خط یک کانال به فرم «اسم | لینک»، مثلاً:\n<code>کانال اصلی | https://t.me/matix_channel\nپشتیبانی | https://t.me/matix_support</code>",
+            "spin_range": "🎲 بازه‌ی جایزه‌ی گردونه‌ی شانس (تومان) رو با کاما بفرست، مثلاً <code>2000,20000</code>:",
             "wallet_topup_presets": (
                 "💰 مبالغ پیشنهادی شارژ کیف پول (تومان) رو با کاما جدا کن و بفرست.\n"
                 "مثال: <code>50000,100000,200000,500000</code>"
@@ -2198,11 +2579,123 @@ async def _handle_callback(cb: dict):
         await _edit(chat_id, message_id, f"❗️ از حذف کد «{code}» مطمئنی؟", kb)
         return
 
+    # ── کدهای هدیه (ادمین) ────────────────────────────────────────────────
+    if data.startswith("giftcodes:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        page = int(data.split(":", 1)[1] or 0)
+        kb, total = _giftcodes_list_kb(chat_id, page)
+        await _edit(chat_id, message_id, f"🎁 کدهای هدیه ({total} مورد):", kb)
+        return
+
+    if data == "gift:new":
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        _pending[chat_id] = {"action": "gift_wizard", "step": "code", "data": {}}
+        await _edit(chat_id, message_id, "🎁 اسم/کد هدیه رو بفرست (مثلاً WELCOME50):",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "gift:cancel"}]]})
+        return
+
+    if data == "gift:cancel":
+        _pending.pop(chat_id, None)
+        kb, total = _giftcodes_list_kb(chat_id, 0)
+        await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n🎁 کدهای هدیه ({total} مورد):", kb)
+        return
+
+    if data == "gift:skip:maxuses":
+        pending = _pending.get(chat_id)
+        if not pending or pending.get("action") != "gift_wizard" or pending.get("step") != "maxuses":
+            await _answer_cb(cb_id, _t(chat_id, "step_invalid"), alert=True)
+            return
+        pending["data"]["max_uses"] = 0
+        pending["step"] = "confirm"
+        await _edit(chat_id, message_id, _giftcode_summary(pending["data"]), _giftcode_confirm_kb(chat_id))
+        return
+
+    if data == "gift:confirm":
+        pending = _pending.get(chat_id)
+        if not pending or pending.get("action") != "gift_wizard" or pending.get("step") != "confirm":
+            await _answer_cb(cb_id, _t(chat_id, "step_invalid"), alert=True)
+            return
+        d = pending["data"]
+        code = d["code"]
+        SHOP.setdefault("gift_codes", {})[code] = {
+            "amount": d["amount"], "active": True,
+            "max_uses": d.get("max_uses", 0), "used_count": 0, "redeemed_by": [],
+        }
+        await _save_shop()
+        _pending.pop(chat_id, None)
+        await _edit(chat_id, message_id, f"✅ کد هدیه «{code}» به مبلغ {d['amount']:,} تومان ساخته شد.", _giftcode_detail_kb(chat_id, code, True))
+        return
+
+    if data.startswith("gift:view:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        code = data.split(":", 2)[2]
+        d = SHOP.get("gift_codes", {}).get(code)
+        if not d:
+            kb, total = _giftcodes_list_kb(chat_id, 0)
+            await _edit(chat_id, message_id, "این کد دیگه وجود نداره.", kb)
+            return
+        await _edit(chat_id, message_id, _giftcode_detail_text(code, d), _giftcode_detail_kb(chat_id, code, d.get("active", True)))
+        return
+
+    if data.startswith("gift:toggle:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        code = data.split(":", 2)[2]
+        d = SHOP.get("gift_codes", {}).get(code)
+        if not d:
+            await _answer_cb(cb_id, "کد پیدا نشد", alert=True)
+            return
+        d["active"] = not d.get("active", True)
+        await _save_shop()
+        await _edit(chat_id, message_id, _giftcode_detail_text(code, d), _giftcode_detail_kb(chat_id, code, d["active"]))
+        return
+
+    if data.startswith("gift:delok:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        code = data.split(":", 2)[2]
+        SHOP.get("gift_codes", {}).pop(code, None)
+        await _save_shop()
+        kb, total = _giftcodes_list_kb(chat_id, 0)
+        await _edit(chat_id, message_id, f"🗑 کد «{code}» حذف شد.", kb)
+        return
+
+    if data.startswith("gift:del:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        code = data.split(":", 2)[2]
+        if code not in SHOP.get("gift_codes", {}):
+            kb, total = _giftcodes_list_kb(chat_id, 0)
+            await _edit(chat_id, message_id, "این کد دیگه وجود نداره.", kb)
+            return
+        kb = {"inline_keyboard": [
+            [{"text": "✅ بله، حذف کن", "callback_data": f"gift:delok:{code}"},
+             {"text": "❌ انصراف", "callback_data": f"gift:view:{code}"}],
+        ]}
+        await _edit(chat_id, message_id, f"❗️ از حذف کد «{code}» مطمئنی؟", kb)
+        return
+
+    # ── دریافت کد هدیه (مشتری) ───────────────────────────────────────────
+    if data == "gift:redeem:start":
+        _pending[chat_id] = {"action": "gift_redeem"}
+        await _edit(chat_id, message_id, "🎁 کد هدیه‌ت رو بفرست:",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "wallet:home"}]]})
+        return
+
     # ── ساخت دستی (ادمین) ───────────────────────────────────────────────────
     if data == "w:cancel":
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
-        await _edit(chat_id, message_id, f"{_t(chat_id, 'gen_cancelled')}\n\n{title}\n\n{sub}", kb)
+        await _edit(chat_id, message_id, f"{_t(chat_id, 'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
         return
 
     if data.startswith("w:"):
