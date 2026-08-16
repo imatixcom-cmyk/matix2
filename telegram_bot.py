@@ -53,6 +53,7 @@ from main import (
     MAX_PORT,
     parse_size_to_bytes,
     parse_speed_to_bytes,
+    TELEGRAM_SETTINGS,
 )
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -92,6 +93,9 @@ SHOP: dict = {
     "required_channel_url": "",   # لینک عضویت در همون کانال (برای دکمه)
     "support_username": "",       # یوزرنیم پشتیبانی برای دکمه‌ی «پشتیبانی» (بدون @)
     "channels": [],                # [{"name": "کانال اصلی", "url": "https://t.me/..."}]
+    "support_messages": [],        # [{"id":int,"chat_id":,"username":,"text":,"at":iso,"read":bool,"replies":[{"from":"admin"|"user","text":,"at":}]}]
+    "support_next_id": 1,
+    "join_log": [],                 # [{"chat_id":,"username":,"at":iso}] — آخرین ۵۰۰ ورود
     "spins": {},                   # str(chat_id) -> تاریخ آخرین چرخش گردونه‌ی شانس (ISO date)
     "spin_min": 2000,              # حداقل جایزه‌ی گردونه‌ی شانس (تومان)
     "spin_max": 20000,             # حداکثر جایزه‌ی گردونه‌ی شانس (تومان)
@@ -325,12 +329,28 @@ T = {
         ),
     },
     "cust_home_sub_start": {
-        "fa": "به <b>Matix</b> خوش اومدی ✨",
-        "en": "Welcome back to <b>Matix</b> ✨",
+        "fa": (
+            "به <b>Matix</b> خوش اومدی ✨\n"
+            "اینترنتِ آزاد، پرسرعت و پایدار، همیشه در دسترسته 🚀\n"
+            "از منوی رنگی زیر هر کاری که لازم داری رو با یه لمس انجام بده 👇"
+        ),
+        "en": (
+            "Welcome back to <b>Matix</b> ✨\n"
+            "Free, fast and stable internet, always ready for you 🚀\n"
+            "Pick anything you need from the colorful menu below 👇"
+        ),
     },
     "cust_home_sub_return": {
-        "fa": "<b>به صفحه‌ی اصلی برگشتی</b>؛ از منو ادامه بده 👇",
-        "en": "<b>Back to the home menu</b>; pick an option below 👇",
+        "fa": (
+            "<b>به صفحه‌ی اصلی برگشتی</b> 🏠\n"
+            "هر کانفیگ، خرید، تمدید یا شارژ کیف پولی که لازم داری از همینجا در دسترسه؛\n"
+            "از منوی زیر ادامه بده 👇"
+        ),
+        "en": (
+            "<b>Back to the home menu</b> 🏠\n"
+            "Every config, purchase, renewal, or wallet action is right here;\n"
+            "continue from the menu below 👇"
+        ),
     },
     "btn_buy": {"fa": "🛒 خرید کانفیگ", "en": "🛒 Buy a Config"},
     "btn_trial": {"fa": "🎁 دریافت تست رایگان", "en": "🎁 Get Free Trial"},
@@ -677,6 +697,8 @@ def _home_view(chat_id: int, mode: str = "home"):
         sub = _t(chat_id, "admin_home_sub")
         n_pending = sum(1 for o in SHOP["orders"].values() if o["status"] == "pending")
         orders_label = _t(chat_id, "btn_admin_orders") + (f" ({n_pending})" if n_pending else "")
+        n_unread = _support_unread_count()
+        support_label = f"📨 پیام‌های پشتیبانی" + (f" ({n_unread} جدید)" if n_unread else "")
         kb = {"inline_keyboard": [
             [_btn(_t(chat_id, "btn_admin_manage"), "list:0", style="primary"),
              _btn(_t(chat_id, "btn_admin_new"), "newcfg", style="success")],
@@ -684,8 +706,12 @@ def _home_view(chat_id: int, mode: str = "home"):
              _btn(_t(chat_id, "btn_admin_settings"), "settings", style="primary")],
             [_btn(_t(chat_id, "btn_check_usage"), "usage:start", style="primary"),
              _btn(_t(chat_id, "btn_admin_stats"), "stats:home", style="primary")],
-            [_btn(f"👥 کاربران ربات ({len(SHOP.get('known_users', []))})", "users:count", style="primary")],
-            [_btn(_t(chat_id, "btn_admin_broadcast"), "bcast:start", style="primary")],
+            [_btn(support_label, "supportmsgs:0", style="danger" if n_unread else "primary"),
+             _btn(f"👥 کاربران ({len(SHOP.get('known_users', []))})", "joins:0", style="primary")],
+            [_btn("💎 مدیریت کیف پول کاربران", "adminwallet:start", style="success"),
+             _btn("👑 افزودن ادمین", "admin:addstart", style="danger")],
+            [_btn(_t(chat_id, "btn_admin_broadcast"), "bcast:start", style="primary"),
+             _btn("✉️ پیام به یک کاربر", "dm:start", style="primary")],
             [_btn(_t(chat_id, "btn_refresh"), "home", style="success"),
              _btn(_t(chat_id, "btn_lang"), "lang:toggle", style="primary")],
         ]}
@@ -697,17 +723,18 @@ def _home_view(chat_id: int, mode: str = "home"):
             sub = _t(chat_id, "cust_home_sub_start")
         else:
             sub = _t(chat_id, "cust_home_sub_return")
-        wallet_label = _t(chat_id, "btn_wallet") + f" ({_wallet_balance(chat_id):,}ت)"
+        wallet_label = "💎 کیف پول" + f" ({_wallet_balance(chat_id):,}ت)"
         rows = [
-            [_btn(_t(chat_id, "btn_buy"), "buy:start", style="success"),
-             _btn("📢 کانال‌های ما", "channels:home", style="success")],
-            [_btn(_t(chat_id, "btn_trial"), "trial:claim", style="success"),
-             _btn("🎲 گردونه شانس", "spin:go", style="success")],
-            [_btn("🛍️ سرویس‌های من", "mine:0", style="danger"),
+            [_btn("⚡️ خرید اشتراک", "buy:start", style="success"),
+             _btn("📡 کانال‌های ما", "channels:home", style="success")],
+            [_btn("🧪 اکانت تست رایگان", "trial:claim", style="success"),
+             _btn("🎰 گردونه شانس", "spin:go", style="success")],
+            [_btn("📦 سرویس‌های من", "mine:0", style="danger"),
              _btn(wallet_label, "wallet:home", style="success")],
-            [_btn(_t(chat_id, "btn_referral") or "👥 زیر مجموعه‌گیری", "ref:home", style="primary"),
-             _btn(_t(chat_id, "btn_help") or "📚 آموزش", "help", style="primary")],
-            [_btn("🧑‍💼 درخواست نمایندگی", "reseller:request", style="success")],
+            [_btn("🤝 زیرمجموعه‌گیری", "ref:home", style="primary"),
+             _btn("🎓 آموزش", "help", style="primary")],
+            [_btn("🎧 پشتیبانی", "support:home", style="primary"),
+             _btn("👑 درخواست نمایندگی", "reseller:request", style="success")],
         ]
         kb = {"inline_keyboard": rows}
     return title, sub, kb
@@ -919,10 +946,16 @@ def _link_detail_kb_customer(chat_id: int, uid: str):
         [_btn(_t(chat_id, "btn_back_list"), "mine:0", style="primary")],
     ]}
 
+async def _countdown_edit(chat_id: int, message_id: int, base: str):
+    """یه افکت شمارش سریع ۱ تا ۳ روی پیام انیمیشن (همزمان با آماده شدن QR در پس‌زمینه)."""
+    for i in range(1, 4):
+        await _edit(chat_id, message_id, f"{base}\n\n⏳ {i}{'.'*i}")
+        await asyncio.sleep(0.32)
+
 async def _deliver_config(chat_id: int, message_id: int | None, uid: str, l: dict, prefix: str = ""):
-    """کانفیگ رو برای مشتری، هرچه سریع‌تر، با QR-Code از خودِ vless (نه لینک ساب) + متن vless
-    قابل کپی و دکمه‌های رنگی ارسال می‌کنه. اگه یه پیام انیمیشن در جریان باشه (message_id)،
-    همزمان با ارسال QR بسته می‌شه تا معطلی نداشته باشه."""
+    """کانفیگ رو برای مشتری، با یه افکت شمارش ۱-۲-۳ کوتاه، QR-Code از خودِ vless (نه لینک ساب)
+    + متن vless قابل کپی و دکمه‌های رنگی ارسال می‌کنه. شمارش و آماده‌سازی QR همزمان انجام می‌شن
+    تا معطلی نداشته باشه."""
     host = get_host()
     vless = vless_link_for_link(l, uid, host)
     caption = (f"{prefix}\n\n" if prefix else "") + _format_detail_simple(l, vless)
@@ -930,7 +963,7 @@ async def _deliver_config(chat_id: int, message_id: int | None, uid: str, l: dic
     photo = _qr_png(vless)
     send_coro = _send_photo_bytes(chat_id, photo, caption, kb) if photo else _send(chat_id, caption, kb)
     if message_id:
-        await asyncio.gather(send_coro, _edit(chat_id, message_id, prefix or "✅ کانفیگت آماده شد!"))
+        await asyncio.gather(send_coro, _countdown_edit(chat_id, message_id, prefix or "✅ کانفیگت آماده شد!"))
     else:
         await send_coro
 
@@ -1159,6 +1192,52 @@ def _giftcode_summary(data: dict) -> str:
         f"حداکثر تعداد استفاده: {max_uses}"
     )
 
+# ── صندوق پیام‌های پشتیبانی (ادمین) ──────────────────────────────────────────
+def _support_unread_count() -> int:
+    return sum(1 for m in SHOP.get("support_messages", []) if not m.get("read"))
+
+def _support_list_kb(chat_id: int, page: int):
+    msgs = sorted(SHOP.get("support_messages", []), key=lambda m: m["id"], reverse=True)
+    total = len(msgs)
+    start = page * PAGE_SIZE
+    chunk = msgs[start:start + PAGE_SIZE]
+    rows = []
+    for m in chunk:
+        dot = "🆕" if not m.get("read") else "✅"
+        uname = f"@{m['username']}" if m.get("username") and " " not in m["username"] else (m.get("username") or str(m["chat_id"]))
+        snippet = (m.get("text") or "")[:24]
+        rows.append([{"text": f"{dot} #{m['id']} {uname} — {snippet}", "callback_data": f"supportmsg:view:{m['id']}"}])
+    nav = []
+    if start > 0:
+        nav.append({"text": _t(chat_id, "btn_prev"), "callback_data": f"supportmsgs:{page-1}"})
+    if start + PAGE_SIZE < total:
+        nav.append({"text": _t(chat_id, "btn_next"), "callback_data": f"supportmsgs:{page+1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}])
+    return {"inline_keyboard": rows}, total
+
+def _support_detail_kb(chat_id: int, sid: int):
+    return {"inline_keyboard": [
+        [_btn("↩️ پاسخ به این تیکت", f"supportmsg:reply:{sid}", style="success")],
+        [_btn("⬅ بازگشت به لیست", "supportmsgs:0", style="primary")],
+    ]}
+
+def _support_detail_text(m: dict) -> str:
+    uname = f"@{m['username']}" if m.get("username") and " " not in m["username"] else (m.get("username") or "—")
+    when = (m.get("at") or "")[:16].replace("T", " ")
+    lines = [
+        f"📨 <b>تیکت #{m['id']}</b>\n",
+        f"👤 {uname} — <code>{m['chat_id']}</code>",
+        f"🕒 {when}\n",
+        f"💬 {m.get('text','')}",
+    ]
+    for r in m.get("replies", []):
+        who = "👤 مشتری" if r.get("from") == "user" else "☎️ پشتیبانی"
+        rwhen = (r.get("at") or "")[:16].replace("T", " ")
+        lines.append(f"\n— {who} ({rwhen}):\n{r.get('text','')}")
+    return "\n".join(lines)
+
 
 def _discount_detail_kb(chat_id: int, code: str, active: bool):
     return {"inline_keyboard": [
@@ -1220,6 +1299,10 @@ async def _handle_message(msg: dict):
     is_new_user = chat_id not in known
     if is_new_user:
         known.append(chat_id)
+        joins = SHOP.setdefault("join_log", [])
+        joins.append({"chat_id": chat_id, "username": username, "at": datetime.now().isoformat()})
+        if len(joins) > 500:
+            del joins[:-500]
         await _save_shop()
         who = f"@{username}" if username and " " not in username else (username or str(chat_id))
         log_activity("telegram", f"👤 کاربر جدید وارد ربات شد: {who} ({chat_id}) — مجموع کاربران: {len(known)}", "ok")
@@ -1695,9 +1778,150 @@ async def _handle_message(msg: dict):
     # ── ورودی تنظیمات فروش (ادمین) ──────────────────────────────────────────
     if pending and pending.get("action") == "support_msg" and text:
         _pending.pop(chat_id, None)
-        await _notify_admins(f"☎️ <b>پیام پشتیبانی از مشتری:</b>\n\n{_buyer_line(chat_id, username)}\n\n💬 {text}")
-        await _send(chat_id, "✅ پیامت برای پشتیبانی ارسال شد؛ به‌زودی جواب می‌گیری.")
+        sid = SHOP.get("support_next_id", 1)
+        SHOP["support_next_id"] = sid + 1
+        SHOP.setdefault("support_messages", []).append({
+            "id": sid, "chat_id": chat_id, "username": username,
+            "text": text, "at": datetime.now().isoformat(), "read": False, "replies": [],
+        })
+        await _save_shop()
+        log_activity("telegram", f"📨 پیام پشتیبانی جدید (#{sid}) از {username or chat_id}", "info")
+        await _send(chat_id, f"✅ پیامت ثبت شد (شماره تیکت #{sid})؛ به‌زودی جواب می‌گیری.")
         return
+
+    # ── پاسخ ادمین به یه تیکت پشتیبانی ──────────────────────────────────────
+    if pending and pending.get("action") == "support_reply" and text and _is_admin(chat_id):
+        sid = pending.get("sid")
+        msg_obj = next((m for m in SHOP.get("support_messages", []) if m["id"] == sid), None)
+        _pending.pop(chat_id, None)
+        if not msg_obj:
+            await _send(chat_id, "این تیکت دیگه پیدا نشد.")
+            return
+        msg_obj.setdefault("replies", []).append({"from": "admin", "text": text, "at": datetime.now().isoformat()})
+        msg_obj["read"] = True
+        await _save_shop()
+        await _send(msg_obj["chat_id"], f"☎️ <b>پاسخ پشتیبانی</b> (تیکت #{sid}):\n\n{text}")
+        await _send(chat_id, f"✅ پاسخت برای تیکت #{sid} ارسال شد.", _support_detail_kb(chat_id, sid))
+        return
+
+    # ── انتقال کیف پول به کاربر دیگر (مشتری) ──────────────────────────────
+    if pending and pending.get("action") == "wallet_transfer" and text:
+        step = pending["step"]
+        wdata = pending["data"]
+        cancel_kb = {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "wallet:home"}]]}
+
+        if step == "target":
+            target = _parse_nonneg_int(text)
+            if target is None or target <= 0:
+                await _send(chat_id, "❗️ یه آیدی عددی معتبر بفرست:", cancel_kb)
+                return
+            if target == chat_id:
+                await _send(chat_id, "❗️ نمی‌تونی به کیف پول خودت انتقال بدی. یه آیدی دیگه بفرست:", cancel_kb)
+                return
+            wdata["target"] = target
+            pending["step"] = "amount"
+            await _send(chat_id, f"💰 چقدر تومان می‌خوای به آیدی <code>{target}</code> بفرستی؟", cancel_kb)
+            return
+
+        if step == "amount":
+            n = _parse_nonneg_int(text)
+            if n is None or n <= 0:
+                await _send(chat_id, "❗️ یه عدد صحیح و بزرگ‌تر از صفر بفرست:", cancel_kb)
+                return
+            if n > _wallet_balance(chat_id):
+                await _send(chat_id, f"❗️ موجودیت کافی نیست. موجودی فعلی: {_wallet_balance(chat_id):,} تومان", cancel_kb)
+                return
+            wdata["amount"] = n
+            pending["step"] = "confirm"
+            confirm_kb = {"inline_keyboard": [
+                [{"text": "✅ تایید و ارسال", "callback_data": "wallet:transfer:confirm"}],
+                [{"text": _t(chat_id, "btn_cancel"), "callback_data": "wallet:home"}],
+            ]}
+            await _send(chat_id, f"💸 مبلغ <b>{n:,} تومان</b> به آیدی <code>{wdata['target']}</code> منتقل بشه؟", confirm_kb)
+            return
+
+    # ── مدیریت کیف پول کاربران توسط ادمین (شارژ/کسر دستی) ──────────────────
+    if pending and pending.get("action") == "admin_wallet" and text and _is_admin(chat_id):
+        step = pending["step"]
+        wdata = pending["data"]
+        cancel_kb = {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}]]}
+
+        if step == "target":
+            target = _parse_nonneg_int(text)
+            if target is None or target <= 0:
+                await _send(chat_id, "❗️ یه آیدی عددی معتبر بفرست:", cancel_kb)
+                return
+            wdata["target"] = target
+            pending["step"] = "amount"
+            await _send(chat_id, f"💰 چقدر تومان به کیف پول <code>{target}</code> اضافه/کم بشه؟ (برای کسر، عدد منفی بفرست، مثلاً <code>-5000</code>)", cancel_kb)
+            return
+
+        if step == "amount":
+            try:
+                n = int(text.strip().replace(",", ""))
+            except Exception:
+                await _send(chat_id, "❗️ یه عدد صحیح بفرست (می‌تونه منفی هم باشه):", cancel_kb)
+                return
+            target = wdata["target"]
+            _wallet_add(target, n)
+            await _save_shop()
+            _pending.pop(chat_id, None)
+            new_balance = _wallet_balance(target)
+            sign = "➕" if n >= 0 else "➖"
+            await _send(chat_id, f"✅ {sign} {abs(n):,} تومان برای <code>{target}</code> اعمال شد.\nموجودی جدید: <b>{new_balance:,} تومان</b>")
+            try:
+                await _send(target, f"💎 موجودی کیف پولت توسط پشتیبانی {sign} <b>{abs(n):,} تومان</b> تغییر کرد.\nموجودی فعلی: <b>{new_balance:,} تومان</b>")
+            except Exception:
+                pass
+            return
+
+    # ── افزودن ادمین جدید ────────────────────────────────────────────────
+    if pending and pending.get("action") == "add_admin" and text and _is_admin(chat_id):
+        _pending.pop(chat_id, None)
+        new_id = _parse_nonneg_int(text)
+        if new_id is None or new_id <= 0:
+            await _send(chat_id, "❗️ آیدی عددی نامعتبر بود. از منو دوباره امتحان کن.")
+            return
+        if new_id in ADMIN_IDS:
+            await _send(chat_id, "این آیدی از قبل ادمینه.")
+            return
+        ADMIN_IDS.add(new_id)
+        TELEGRAM_SETTINGS["admin_ids"] = sorted(ADMIN_IDS)
+        await save_state()
+        log_activity("telegram", f"👑 ادمین جدید اضافه شد: {new_id}", "ok")
+        await _send(chat_id, f"✅ آیدی <code>{new_id}</code> به‌عنوان ادمین اضافه شد.")
+        try:
+            await _send(new_id, "👑 تبریک! تو الان یکی از ادمین‌های ربات Matix هستی. برای دیدن پنل مدیریت /start رو بزن.")
+        except Exception:
+            pass
+        return
+
+    # ── ارسال پیام مستقیم ادمین به یک کاربر خاص ─────────────────────────────
+    if pending and pending.get("action") == "dm_send" and text and _is_admin(chat_id):
+        step = pending["step"]
+        wdata = pending["data"]
+        cancel_kb = {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}]]}
+
+        if step == "target":
+            target = _parse_nonneg_int(text)
+            if target is None or target <= 0:
+                await _send(chat_id, "❗️ یه آیدی عددی معتبر بفرست:", cancel_kb)
+                return
+            wdata["target"] = target
+            pending["step"] = "text"
+            await _send(chat_id, f"✉️ متن پیامی که می‌خوای برای <code>{target}</code> ارسال بشه رو بفرست:", cancel_kb)
+            return
+
+        if step == "text":
+            wdata["text"] = text
+            pending["step"] = "confirm"
+            preview = text if len(text) <= 300 else text[:300] + "…"
+            confirm_kb = {"inline_keyboard": [
+                [{"text": "✅ ارسال", "callback_data": "dm:confirm"}],
+                [{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}],
+            ]}
+            await _send(chat_id, f"✉️ این پیام برای <code>{wdata['target']}</code> ارسال بشه؟\n\n«{preview}»", confirm_kb)
+            return
 
     if pending and pending.get("action") == "set_value" and text and _is_admin(chat_id):
         field = pending["field"]
@@ -1882,15 +2106,50 @@ async def _handle_callback(cb: dict):
     # ── پشتیبانی ───────────────────────────────────────────────────────────
     if data == "support:home":
         uname = (SHOP.get("support_username") or "").lstrip("@")
+        _pending[chat_id] = {"action": "support_msg"}
+        txt = "🎧 <b>پشتیبانی Matix</b>\n\nپیامت رو بنویس و بفرست؛ مستقیم توی صندوق پشتیبانی ثبت می‌شه و به‌زودی جواب می‌گیری."
         rows = []
         if uname:
-            rows.append([_btn("💬 گفتگو با پشتیبانی", url=f"https://t.me/{uname}", style="primary")])
-            txt = "☎️ <b>پشتیبانی Matix</b>\n\nبرای ارتباط مستقیم با پشتیبانی روی دکمه‌ی زیر بزن."
-        else:
-            txt = "☎️ <b>پشتیبانی Matix</b>\n\nپیامت رو همین‌جا بفرست تا مستقیم به تیم پشتیبانی ارسال بشه."
-            _pending[chat_id] = {"action": "support_msg"}
-        rows.append([_btn(_t(chat_id, "btn_back_home"), "home")])
+            rows.append([_btn("💬 گفتگوی مستقیم با پشتیبانی", url=f"https://t.me/{uname}", style="primary")])
+        rows.append([_btn(_t(chat_id, "btn_back_home"), "home", style="success")])
         await _edit(chat_id, message_id, txt, {"inline_keyboard": rows})
+        return
+
+    # ── صندوق پیام‌های پشتیبانی (ادمین) ──────────────────────────────────────
+    if data.startswith("supportmsgs:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        page = int(data.split(":", 1)[1] or 0)
+        kb, total = _support_list_kb(chat_id, page)
+        n_unread = _support_unread_count()
+        await _edit(chat_id, message_id, f"📨 صندوق پشتیبانی ({total} تیکت، {n_unread} خونده‌نشده):", kb)
+        return
+
+    if data.startswith("supportmsg:view:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        sid = int(data.split(":", 2)[2])
+        m = next((x for x in SHOP.get("support_messages", []) if x["id"] == sid), None)
+        if not m:
+            kb, total = _support_list_kb(chat_id, 0)
+            await _edit(chat_id, message_id, "این تیکت دیگه پیدا نشد.", kb)
+            return
+        if not m.get("read"):
+            m["read"] = True
+            await _save_shop()
+        await _edit(chat_id, message_id, _support_detail_text(m), _support_detail_kb(chat_id, sid))
+        return
+
+    if data.startswith("supportmsg:reply:"):
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        sid = int(data.split(":", 2)[2])
+        _pending[chat_id] = {"action": "support_reply", "sid": sid}
+        await _edit(chat_id, message_id, f"↩️ پاسخت به تیکت #{sid} رو بنویس:",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": f"supportmsg:view:{sid}"}]]})
         return
 
     # ── درخواست نمایندگی ──────────────────────────────────────────────────
@@ -1899,12 +2158,31 @@ async def _handle_callback(cb: dict):
         await _answer_cb(cb_id, "✅ درخواستت برای تیم ادمین ارسال شد؛ به‌زودی باهات تماس می‌گیریم.", alert=True)
         return
 
-    # ── تعداد کاربران ربات (فقط ادمین) ─────────────────────────────────────
-    if data == "users:count":
+    # ── ورودهای اخیر ربات (فقط ادمین) ────────────────────────────────────────
+    if data.startswith("joins:"):
         if not _is_admin(chat_id):
             await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
             return
-        await _answer_cb(cb_id, f"👥 تعداد کل کاربران ربات: {len(SHOP.get('known_users', []))}", alert=True)
+        page = int(data.split(":", 1)[1] or 0)
+        joins = list(reversed(SHOP.get("join_log", [])))
+        total = len(joins)
+        start = page * PAGE_SIZE
+        chunk = joins[start:start + PAGE_SIZE]
+        lines = [f"👥 <b>کاربران ربات: {len(SHOP.get('known_users', []))} نفر</b>\n"]
+        for j in chunk:
+            uname = f"@{j['username']}" if j.get("username") and " " not in j["username"] else (j.get("username") or "—")
+            when = (j.get("at") or "")[:16].replace("T", " ")
+            lines.append(f"🟢 {uname} — <code>{j['chat_id']}</code> — {when}")
+        if not chunk:
+            lines.append("هنوز ورودی ثبت نشده.")
+        nav = []
+        if start > 0:
+            nav.append({"text": _t(chat_id, "btn_prev"), "callback_data": f"joins:{page-1}"})
+        if start + PAGE_SIZE < total:
+            nav.append({"text": _t(chat_id, "btn_next"), "callback_data": f"joins:{page+1}"})
+        rows = [nav] if nav else []
+        rows.append([_btn(_t(chat_id, "btn_back_home"), "home", style="success")])
+        await _edit(chat_id, message_id, "\n".join(lines), {"inline_keyboard": rows})
         return
 
     # ── استعلام حجم کانفیگ (دکمه‌ی جدا) ─────────────────────────────────────
@@ -2100,13 +2378,67 @@ async def _handle_callback(cb: dict):
     # ── کیف پول ──────────────────────────────────────────────────────────────
     if data == "wallet:home":
         balance = _wallet_balance(chat_id)
-        txt = f"💰 <b>کیف پول Matix</b>\n\nموجودی فعلی: <b>{balance:,} تومان</b>"
+        txt = (
+            f"💎 <b>کیف پول Matix</b>\n\n"
+            f"موجودی فعلی: <b>{balance:,} تومان</b>\n"
+            f"🆔 آیدی کیف پولت: <code>{chat_id}</code>\n"
+            f"(این آیدی رو به بقیه بده تا بتونن براش پول بفرستن)"
+        )
         kb = {"inline_keyboard": [
             [_btn("➕ شارژ کیف پول", "wallet:topup:start", style="success")],
+            [_btn("💸 انتقال به آیدی دیگر", "wallet:transfer:start", style="success")],
             [_btn("🎁 کد هدیه دارم", "gift:redeem:start", style="success")],
             [_btn(_t(chat_id, "btn_back_home"), "home", style="primary")],
         ]}
         await _edit(chat_id, message_id, txt, kb)
+        return
+
+    if data == "wallet:transfer:start":
+        _pending[chat_id] = {"action": "wallet_transfer", "step": "target", "data": {}}
+        await _edit(chat_id, message_id, "💸 آیدی عددی کیف پول مقصد رو بفرست:",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "wallet:home"}]]})
+        return
+
+    if data == "wallet:transfer:confirm":
+        pending = _pending.get(chat_id)
+        if not pending or pending.get("action") != "wallet_transfer" or pending.get("step") != "confirm":
+            await _answer_cb(cb_id, _t(chat_id, "step_invalid"), alert=True)
+            return
+        wdata = pending["data"]
+        target, amount = wdata["target"], wdata["amount"]
+        if not _wallet_sub(chat_id, amount):
+            _pending.pop(chat_id, None)
+            await _edit(chat_id, message_id, "❗️ موجودیت کافی نیست.", {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "wallet:home"}]]})
+            return
+        _wallet_add(target, amount)
+        await _save_shop()
+        _pending.pop(chat_id, None)
+        await _edit(chat_id, message_id, f"✅ مبلغ <b>{amount:,} تومان</b> به آیدی <code>{target}</code> منتقل شد.\nموجودی فعلی تو: <b>{_wallet_balance(chat_id):,} تومان</b>",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "wallet:home"}]]})
+        try:
+            await _send(target, f"💎 مبلغ <b>{amount:,} تومان</b> از یه کاربر دیگه به کیف پولت واریز شد!\nموجودی فعلی: <b>{_wallet_balance(target):,} تومان</b>")
+        except Exception:
+            pass
+        return
+
+    # ── مدیریت کیف پول کاربران (ادمین) ─────────────────────────────────────
+    if data == "adminwallet:start":
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        _pending[chat_id] = {"action": "admin_wallet", "step": "target", "data": {}}
+        await _edit(chat_id, message_id, "💎 آیدی عددی کیف پولی که می‌خوای شارژ/کسر کنی رو بفرست:",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}]]})
+        return
+
+    # ── افزودن ادمین جدید ────────────────────────────────────────────────
+    if data == "admin:addstart":
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        _pending[chat_id] = {"action": "add_admin"}
+        await _edit(chat_id, message_id, "👑 آیدی عددی تلگرام شخصی که می‌خوای ادمین بشه رو بفرست:\n(برای گرفتن آیدی عددی، طرف باید یه بار به @userinfobot پیام بده)",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}]]})
         return
 
     if data == "wallet:topup:start":
@@ -2273,6 +2605,35 @@ async def _handle_callback(cb: dict):
         _pending.pop(chat_id, None)
         title, sub, kb = _home_view(chat_id)
         await _edit(chat_id, message_id, f"{_t(chat_id,'gen_cancelled')}\n\n" + _join_ts(title, sub), kb)
+        return
+
+    # ── ارسال پیام مستقیم به یک کاربر خاص ────────────────────────────────────
+    if data == "dm:start":
+        if not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "no_access_cb"), alert=True)
+            return
+        _pending[chat_id] = {"action": "dm_send", "step": "target", "data": {}}
+        await _edit(chat_id, message_id, "✉️ آیدی عددی کاربری که می‌خوای بهش پیام بدی رو بفرست:",
+                    {"inline_keyboard": [[{"text": _t(chat_id, "btn_cancel"), "callback_data": "home"}]]})
+        return
+
+    if data == "dm:confirm":
+        pending = _pending.get(chat_id)
+        if not pending or pending.get("action") != "dm_send" or pending.get("step") != "confirm" or not _is_admin(chat_id):
+            await _answer_cb(cb_id, _t(chat_id, "step_invalid"), alert=True)
+            return
+        wdata = pending["data"]
+        target, dm_text = wdata["target"], wdata["text"]
+        _pending.pop(chat_id, None)
+        try:
+            r = await _send(target, f"☎️ <b>پیام از تیم Matix</b>:\n\n{dm_text}")
+            ok = bool(r and r.get("ok"))
+        except Exception:
+            ok = False
+        if ok:
+            await _edit(chat_id, message_id, f"✅ پیام برای <code>{target}</code> ارسال شد.", {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}]]})
+        else:
+            await _edit(chat_id, message_id, f"❗️ ارسال پیام به <code>{target}</code> ناموفق بود (شاید کاربر ربات رو بلاک کرده یا هنوز /start نزده).", {"inline_keyboard": [[{"text": _t(chat_id, "btn_back_home"), "callback_data": "home"}]]})
         return
 
     # ── بخش ادمین: لیست کامل کانفیگ‌ها ──────────────────────────────────────

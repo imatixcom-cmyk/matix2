@@ -117,11 +117,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
   --bg:#0B0714;--bg2:#160C29;--bg3:#1E1338;
-  --card:#160C29;--card-b:rgba(139,92,246,0.16);--card-bh:rgba(139,92,246,0.32);
+  --card:rgba(9,38,48,0.55);--card-b:rgba(139,92,246,0.18);--card-bh:rgba(139,92,246,0.4);
+  --glass-brd:rgba(255,255,255,0.10);--glass-hl:rgba(255,255,255,0.07);--glass-blur:22px;
   --accent:#8B5CF6;--accent2:#A78BFA;--accent-d:rgba(139,92,246,0.14);--on-accent:#FFFFFF;
   --green:#10B981;--green-bg:rgba(16,185,129,0.1);--green-t:#34D399;
   --red:#EF4444;--red-bg:rgba(239,68,68,0.1);--red-t:#F87171;
@@ -134,7 +136,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 }
 [data-theme="light"]{
   --bg:#F6F0FF;--bg2:#EFE3FF;--bg3:#E6D6FF;
-  --card:#FFFFFF;--card-b:rgba(139,92,246,0.16);--card-bh:rgba(139,92,246,0.35);
+  --card:rgba(255,255,255,0.55);--card-b:rgba(139,92,246,0.18);--card-bh:rgba(139,92,246,0.4);
+  --glass-brd:rgba(255,255,255,0.5);--glass-hl:rgba(255,255,255,0.6);
   --accent:#6D28D9;--accent2:#7C3AED;--accent-d:rgba(109,40,217,0.08);--on-accent:#FFFFFF;
   --green:#059669;--green-bg:rgba(5,150,105,0.08);--green-t:#065F46;
   --red:#DC2626;--red-bg:rgba(220,38,38,0.08);--red-t:#991B1B;
@@ -145,7 +148,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   --shadow:0 4px 20px rgba(0,0,0,0.1);
 }
 html,body{height:100%}
-body{font-family:'Vazirmatn',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;display:flex;font-size:14px;transition:background .3s,color .3s}
+body{font-family:'Vazirmatn',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;display:flex;font-size:14px;transition:background .3s,color .3s;position:relative}
+/* ══════ پس‌زمینه‌ی آئورا (Liquid Glass) ══════ */
+.aurora-bg{position:fixed;inset:0;overflow:hidden;z-index:0;pointer-events:none}
+.aurora-bg span{position:absolute;border-radius:50%;filter:blur(80px);opacity:.35;animation:auroraFloat 16s ease-in-out infinite}
+.aurora-bg span:nth-child(1){width:420px;height:420px;background:radial-gradient(circle,#8B5CF6,transparent 70%);top:-10%;right:-6%;animation-duration:18s}
+.aurora-bg span:nth-child(2){width:360px;height:360px;background:radial-gradient(circle,#A78BFA,transparent 70%);bottom:-12%;left:-8%;animation-duration:22s;animation-delay:2s}
+.aurora-bg span:nth-child(3){width:300px;height:300px;background:radial-gradient(circle,#C4B5FD,transparent 70%);top:40%;left:38%;animation-duration:20s;animation-delay:5s;opacity:.22}
+[data-theme="light"] .aurora-bg span{opacity:.28}
+@keyframes auroraFloat{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(30px,-24px) scale(1.08)}66%{transform:translate(-24px,20px) scale(.95)}}
+/* ══════ لیوان مایع (Glassmorphism) روی همه‌ی کارت‌ها و پنل‌ها ══════ */
+.sidebar,.metric,.traf-main-stat,.traf-mini,.traf-chart-card,.create-panel,.srv-panel,.pw-panel,
+.conn-hero-tile,.conn-card-v2,.conn-empty-v2,.subs-search input,.sub-card,.subs-empty-v2,
+.modal-v2,.modal,.toast,.cfg-card,.bulk-bar,.conn-card,.cfgdash-item,.nav-it,.mob-top{
+  backdrop-filter:blur(var(--glass-blur)) saturate(160%);
+  -webkit-backdrop-filter:blur(var(--glass-blur)) saturate(160%);
+}
+.metric,.traf-main-stat,.traf-mini,.traf-chart-card,.create-panel,.srv-panel,.pw-panel,
+.conn-hero-tile,.conn-card-v2,.sub-card,.modal-v2,.modal,.cfg-card,.bulk-bar,.conn-card,.cfgdash-item{
+  box-shadow:inset 0 1px 0 var(--glass-hl),0 8px 28px -8px rgba(0,0,0,.35);
+}
+[data-theme="light"] .nav-it{background:var(--card)}
+/* ══════ آیکون‌های متحرک (Glow + Float + Pulse) ══════ */
+.m-icon,.traf-mini-icon,.srv-tile-icon,.srv-hero-icon,.pw-hero-icon,.conn-hero-tile,
+.stat-card .m-icon,.nav-it.on i,.logo-img,.mob-logo,.tb-title i{
+  box-shadow:0 0 18px -3px currentColor,inset 0 0 0 1px var(--glass-hl);
+  animation:iconFloat 3.6s ease-in-out infinite;
+}
+.m-icon i,.traf-mini-icon i,.srv-tile-icon i,.srv-hero-icon i,.pw-hero-icon i,.conn-hero-tile i,.tb-title i{
+  filter:drop-shadow(0 0 6px currentColor);
+  display:inline-block;
+  animation:iconPulse 2.4s ease-in-out infinite;
+}
+@keyframes iconFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes iconPulse{0%,100%{filter:drop-shadow(0 0 4px currentColor);transform:scale(1)}50%{filter:drop-shadow(0 0 10px currentColor);transform:scale(1.08)}}
+.logo-img,.mob-logo{animation:iconFloat 3.6s ease-in-out infinite,spin360 14s linear infinite}
+@keyframes spin360{0%{filter:hue-rotate(0deg)}100%{filter:hue-rotate(20deg)}}
+.nav-it i{transition:transform .25s}
+.nav-it:hover i{transform:scale(1.15) translateY(-1px)}
+/* ══════ اسم پنل متحرک (Shimmer) ══════ */
+.logo-name,.mob-title{background-size:200% auto;animation:brandShine 3.4s linear infinite}
+@keyframes brandShine{0%{background-position:200% center}100%{background-position:-200% center}}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:var(--bg)}
 ::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:3px}
@@ -611,6 +654,21 @@ a{color:inherit;text-decoration:none}
 .lrow-badge{font-size:9px;padding:2px 7px;border-radius:5px;background:var(--green-bg);color:var(--green-t);font-weight:700}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(40px);background:var(--card);border:1px solid var(--card-b);color:var(--t1);border-radius:10px;padding:10px 18px;font-size:12.5px;opacity:0;transition:all .25s;z-index:999;pointer-events:none;display:flex;align-items:center;gap:8px;box-shadow:var(--shadow);white-space:nowrap}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* ══════ اورلی بروزرسانی خودکار (Update Overlay) ══════ */
+.upd-overlay{display:none;position:fixed;inset:0;z-index:900;align-items:center;justify-content:center;background:rgba(2,10,14,.72);backdrop-filter:blur(10px)}
+.upd-overlay.show{display:flex;animation:fi .2s ease}
+.upd-card{width:min(360px,90vw);text-align:center;padding:36px 26px 30px;border-radius:26px;background:var(--card);border:1px solid var(--glass-brd);backdrop-filter:blur(30px) saturate(180%);box-shadow:0 0 90px rgba(139,92,246,.18),0 20px 60px rgba(0,0,0,.5);position:relative;overflow:hidden}
+.upd-card::before{content:'';position:absolute;top:-60%;left:-30%;width:220px;height:220px;background:radial-gradient(circle,rgba(139,92,246,.25),transparent 70%);animation:auroraFloat 8s ease-in-out infinite}
+.upd-ring{width:78px;height:78px;margin:0 auto 18px;border-radius:50%;position:relative;display:flex;align-items:center;justify-content:center}
+.upd-ring::before{content:'';position:absolute;inset:0;border-radius:50%;border:3px solid var(--card-b);border-top-color:var(--accent);border-right-color:var(--accent2);animation:spin 1s linear infinite;box-shadow:0 0 20px -2px var(--accent)}
+.upd-ring i{font-size:26px;color:var(--accent);filter:drop-shadow(0 0 8px var(--accent))}
+.upd-ring.done::before{animation:none;border-color:var(--green);box-shadow:0 0 20px -2px var(--green)}
+.upd-ring.done i{color:var(--green);filter:drop-shadow(0 0 8px var(--green));animation:popIn .4s cubic-bezier(.34,1.56,.64,1)}
+@keyframes popIn{0%{transform:scale(0);opacity:0}70%{transform:scale(1.25)}100%{transform:scale(1);opacity:1}}
+.upd-title{font-size:15px;font-weight:800;color:var(--t1);margin-bottom:6px;position:relative;z-index:1}
+.upd-sub{font-size:11.5px;color:var(--t3);line-height:1.9;position:relative;z-index:1}
+.upd-dots::after{content:'';animation:updDots 1.4s steps(4,end) infinite}
+@keyframes updDots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
 .toast.ok{border-color:rgba(255,255,255,.3);background:var(--green-bg);color:var(--green-t)}
 .toast.err{border-color:rgba(239,68,68,.3);background:var(--red-bg);color:var(--red-t)}
 .dash-footer{border-top:1px solid var(--card-b);margin-top:14px;padding-top:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
@@ -745,7 +803,15 @@ a{color:inherit;text-decoration:none}
 </style>
 </head>
 <body>
+<div class="aurora-bg"><span></span><span></span><span></span></div>
 <div class="toast" id="toast"></div>
+<div class="upd-overlay" id="upd-overlay">
+  <div class="upd-card">
+    <div class="upd-ring" id="upd-ring"><i class="ti ti-refresh" id="upd-ring-icon"></i></div>
+    <div class="upd-title" id="upd-title">در حال دریافت آخرین نسخه</div>
+    <div class="upd-sub upd-dots" id="upd-sub">اتصال به گیت‌هاب</div>
+  </div>
+</div>
 <div class="modal-bg" id="modal-edit-link">
   <div class="modal">
     <button class="modal-close" onclick="closeModal('modal-edit-link')"><i class="ti ti-x"></i></button>
@@ -795,6 +861,15 @@ a{color:inherit;text-decoration:none}
     <button class="modal-close" onclick="closeModal('modal-link-chart')"><i class="ti ti-x"></i></button>
     <div class="modal-title" id="lc-title"><i class="ti ti-chart-line"></i> نمودار مصرف</div>
     <div style="height:280px;margin-top:10px"><canvas id="lc-canvas"></canvas></div>
+  </div>
+</div>
+<div class="modal-bg" id="modal-qr">
+  <div class="modal" style="max-width:340px;text-align:center">
+    <button class="modal-close" onclick="closeModal('modal-qr')"><i class="ti ti-x"></i></button>
+    <div class="modal-title" id="qr-modal-title"><i class="ti ti-qrcode"></i> QR کانفیگ</div>
+    <div id="qr-modal-canvas" style="display:flex;justify-content:center;margin:16px 0;padding:14px;background:#fff;border-radius:16px"></div>
+    <div style="font-size:11px;color:var(--t3);margin-bottom:10px">این کد رو با اپلیکیشن v2Box اسکن کن</div>
+    <button class="btn btn-o" style="width:100%" onclick="navigator.clipboard.writeText(window._qrCurrentLink||'').then(()=>toast('لینک کپی شد','ok'))"><i class="ti ti-copy"></i> کپی متن کانفیگ</button>
   </div>
 </div>
 <div class="mob-top">
@@ -1206,7 +1281,7 @@ a{color:inherit;text-decoration:none}
       </div>
       <div class="srv-tiles">
         <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-route"></i></div><div class="srv-tile-text"><div class="srv-tile-label">پورت پیش‌فرض</div><div class="srv-tile-val">443 (TLS) · قابل تغییر در هر کانفیگ</div></div></div>
-        <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-versions"></i></div><div class="srv-tile-text"><div class="srv-tile-label">نسخه</div><div class="srv-tile-val"></div></div></div>
+        <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-versions"></i></div><div class="srv-tile-text"><div class="srv-tile-label">نسخه</div><div class="srv-tile-val" id="set-version">—</div></div></div>
         <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-brand-fastapi"></i></div><div class="srv-tile-text"><div class="srv-tile-label">فریم‌ورک</div><div class="srv-tile-val">FastAPI + Uvicorn</div></div></div>
         <div class="srv-tile"><div class="srv-tile-icon"><i class="ti ti-cloud"></i></div><div class="srv-tile-text"><div class="srv-tile-label">پلتفرم</div><div class="srv-tile-val">Railway</div></div></div>
         <div class="srv-tile" style="grid-column:1/-1"><div class="srv-tile-icon"><i class="ti ti-device-floppy"></i></div><div class="srv-tile-text"><div class="srv-tile-label">ذخیره‌سازی</div><div class="srv-tile-val">JSON File (/data)</div></div></div>
@@ -1256,6 +1331,34 @@ a{color:inherit;text-decoration:none}
           <button class="pw-eye" type="button" onclick="togglePwField('cp-cf',this)"><i class="ti ti-eye"></i></button>
         </div>
         <button class="pw-submit" onclick="changePw()"><i class="ti ti-shield-check"></i> ذخیره رمز جدید</button>
+      </div>
+    </div>
+  </div>
+  <div class="srv-panel" style="margin-bottom:16px">
+    <div class="srv-hero">
+      <div class="srv-hero-icon"><i class="ti ti-brand-github"></i></div>
+      <div class="srv-hero-text">
+        <div class="srv-hero-domain">بروزرسانی خودکار از گیت‌هاب</div>
+        <div class="srv-hero-sub"><span class="dot db pulse"></span> نسخه فعلی: <b id="upd-current-sha" style="margin-right:3px">نامشخص</b></div>
+      </div>
+    </div>
+    <div style="padding:0 22px 20px">
+      <div style="color:var(--t3);font-size:11.5px;margin-bottom:14px;line-height:1.9">آدرس ریپازیتوری گیت‌هابی که سورس Matix رو نگه می‌داره وارد کن. با زدن دکمه‌ی بررسی، آخرین کامیت شاخه‌ی موردنظر چک می‌شه و در صورت وجود آپدیت، می‌تونی با یک کلیک فایل‌های جدید رو بگیری و سرور خودکار ری‌استارت بشه.</div>
+      <div class="form-row" style="margin-bottom:12px">
+        <div class="fg" style="flex:2"><label>ریپازیتوری (owner/repo)</label><input class="fi" id="upd-repo" placeholder="مثال: myuser/matix-panel" style="width:100%"></div>
+        <div class="fg" style="flex:1"><label>شاخه (Branch)</label><input class="fi" id="upd-branch" placeholder="main" style="width:100%"></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="pw-submit" style="flex:1;min-width:160px;background:linear-gradient(135deg,#334155,#1e293b);box-shadow:0 6px 18px rgba(30,41,59,.32)" onclick="saveUpdateSettings()" id="upd-save-btn"><i class="ti ti-device-floppy"></i> ذخیره تنظیمات</button>
+        <button class="pw-submit" style="flex:1;min-width:160px" onclick="checkForUpdate()" id="upd-check-btn"><i class="ti ti-refresh"></i> بررسی بروزرسانی</button>
+      </div>
+      <div id="upd-result" style="display:none;margin-top:14px;padding:14px 16px;border-radius:14px;background:var(--accent-d);border:1px solid var(--card-b)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <i class="ti ti-sparkles" style="color:var(--accent)"></i>
+          <b style="font-size:12.5px;color:var(--t1)" id="upd-result-title">—</b>
+        </div>
+        <div style="font-size:11px;color:var(--t3);line-height:1.8" id="upd-result-msg">—</div>
+        <button class="pw-submit" style="margin-top:12px;background:linear-gradient(135deg,#2ecc71,#27ae60);box-shadow:0 6px 18px rgba(39,174,96,.32);display:none" onclick="applyUpdate()" id="upd-apply-btn"><i class="ti ti-download"></i> اعمال بروزرسانی و ری‌استارت</button>
       </div>
     </div>
   </div>
@@ -1369,6 +1472,95 @@ async function downloadBackup(){
     btn.disabled=false;btn.innerHTML=orig;
   }
 }
+// ── بروزرسانی خودکار از گیت‌هاب ──────────────────────────────────────────────
+async function loadUpdateSettings(){
+  try{
+    const r=await authF('/api/update/settings');
+    const d=await r.json();
+    document.getElementById('upd-repo').value=d.repo||'';
+    document.getElementById('upd-branch').value=d.branch||'main';
+    const shaEl=document.getElementById('upd-current-sha');
+    shaEl.textContent=d.current_sha?('#'+d.current_sha):'نامشخص';
+    document.getElementById('set-version').textContent=d.current_sha?('#'+d.current_sha):'—';
+  }catch(e){}
+}
+async function saveUpdateSettings(){
+  const btn=document.getElementById('upd-save-btn');
+  const orig=btn.innerHTML;
+  const repo=document.getElementById('upd-repo').value.trim();
+  const branch=document.getElementById('upd-branch').value.trim()||'main';
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2" style="animation:spin 1s linear infinite"></i> در حال ذخیره...';
+  try{
+    const r=await authF('/api/update/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,branch})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'خطا در ذخیره تنظیمات');
+    toast('تنظیمات گیت‌هاب ذخیره شد ✓','ok');
+    loadUpdateSettings();
+  }catch(e){
+    toast(e.message||'خطا در ذخیره تنظیمات','err');
+  }finally{
+    btn.disabled=false;btn.innerHTML=orig;
+  }
+}
+async function checkForUpdate(){
+  const btn=document.getElementById('upd-check-btn');
+  const orig=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2" style="animation:spin 1s linear infinite"></i> در حال بررسی...';
+  const box=document.getElementById('upd-result'),title=document.getElementById('upd-result-title'),msg=document.getElementById('upd-result-msg'),applyBtn=document.getElementById('upd-apply-btn');
+  try{
+    const r=await authF('/api/update/check');
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'خطا در بررسی بروزرسانی');
+    box.style.display='block';
+    if(d.has_update){
+      title.textContent='🚀 نسخه‌ی جدید موجود است: #'+d.latest_sha;
+      msg.textContent=(d.latest_message||'—')+(d.latest_date?(' · '+new Date(d.latest_date).toLocaleDateString('fa-IR')):'');
+      applyBtn.style.display='flex';
+      applyBtn.dataset.sha=d.latest_sha;
+    }else{
+      title.textContent='✓ پنل شما به‌روز است';
+      msg.textContent='آخرین نسخه‌ی موجود روی گیت‌هاب همینه که الان روی سرور اجراست.';
+      applyBtn.style.display='none';
+    }
+  }catch(e){
+    toast(e.message||'خطا در بررسی بروزرسانی','err');
+  }finally{
+    btn.disabled=false;btn.innerHTML=orig;
+  }
+}
+async function applyUpdate(){
+  if(!confirm('با تایید، فایل‌های جدید از گیت‌هاب دانلود و جایگزین می‌شن و سرور خودکار ری‌استارت می‌شه. ادامه می‌دی؟'))return;
+  const overlay=document.getElementById('upd-overlay'),ring=document.getElementById('upd-ring'),icon=document.getElementById('upd-ring-icon'),title=document.getElementById('upd-title'),sub=document.getElementById('upd-sub');
+  ring.classList.remove('done');icon.className='ti ti-refresh';
+  title.textContent='در حال دریافت آخرین نسخه';
+  sub.textContent='اتصال به گیت‌هاب';sub.classList.add('upd-dots');
+  overlay.classList.add('show');
+  try{
+    const r=await authF('/api/update/apply',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'خطا در بروزرسانی');
+    ring.classList.add('done');icon.className='ti ti-check';
+    sub.classList.remove('upd-dots');
+    title.textContent='بروزرسانی با موفقیت اعمال شد ✓';
+    sub.textContent=(d.updated_files&&d.updated_files.length?(d.updated_files.length+' فایل بروزرسانی شد'):'همه فایل‌ها به‌روز بودند')+' — سرور در حال ری‌استارت است...';
+    await waitForRestart();
+  }catch(e){
+    overlay.classList.remove('show');
+    toast(e.message||'خطا در اعمال بروزرسانی','err');
+  }
+}
+async function waitForRestart(){
+  await new Promise(res=>setTimeout(res,2500));
+  const sub=document.getElementById('upd-sub');
+  for(let i=0;i<30;i++){
+    try{
+      const r=await fetch('/health',{cache:'no-store'});
+      if(r.ok){sub.textContent='سرور بالا آمد، در حال بارگذاری مجدد...';await new Promise(res=>setTimeout(res,600));location.reload();return;}
+    }catch(e){}
+    await new Promise(res=>setTimeout(res,1000));
+  }
+  location.reload();
+}
 function setQuota(val,unit,el){
   document.getElementById('nl-val').value = val===0?'':val;
   document.getElementById('nl-unit').value = unit;
@@ -1411,7 +1603,7 @@ overlay.addEventListener('click',closeSb);
 function navTo(name){
   document.querySelectorAll('.nav-it').forEach(n=>n.classList.toggle('on',n.dataset.pg===name));
   document.querySelectorAll('.pg').forEach(p=>p.classList.toggle('on',p.id==='pg-'+name));
-  const loaders={links:loadLinks,connections:loadConns,errors:loadErrs,logs:loadActivity,cfgdash:loadCfgDash,telegram:loadTelegramSettings};
+  const loaders={links:loadLinks,connections:loadConns,errors:loadErrs,logs:loadActivity,cfgdash:loadCfgDash,telegram:loadTelegramSettings,settings:loadUpdateSettings};
   if(loaders[name])loaders[name]();
   closeSb();window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -1556,7 +1748,7 @@ function renderLinksGrid(){
         <button class="tog${allowed?' on':''}" onclick="toggleActive('${l.uuid}',${!l.active})" title="فعال/غیرفعال"></button>
         <button class="btn btn-sm btn-blue btn-icon" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
         <button class="btn btn-sm btn-blue btn-icon" onclick="window.open('${esc(l.sub_url)}','_blank')" title="باز کردن داشبورد ساب"><i class="ti ti-rss"></i></button>
-        <button class="btn btn-sm btn-blue btn-icon" onclick="showQR('${esc(l.vless_link)}')" title="QR"><i class="ti ti-qrcode"></i></button>
+        <button class="btn btn-sm btn-blue btn-icon" onclick="showQR('${esc(l.vless_link)}','${esc(l.label)}')" title="QR"><i class="ti ti-qrcode"></i></button>
         <button class="btn btn-sm btn-blue btn-icon" onclick="openLinkChart('${l.uuid}','${esc(l.label)}')" title="نمودار مصرف ۳۰ روز اخیر"><i class="ti ti-chart-line"></i></button>
         <button class="btn btn-sm btn-amber btn-icon" onclick="openEditLink('${l.uuid}')" title="ویرایش"><i class="ti ti-edit"></i></button>
         <button class="btn btn-sm btn-green btn-icon" onclick="resetUsage('${l.uuid}')" title="ریست مصرف"><i class="ti ti-rotate"></i></button>
@@ -1691,7 +1883,14 @@ async function deleteLink(uuid){
   if(!confirm('حذف این کانفیگ؟'))return;
   try{const r=await authF('/api/links/'+uuid,{method:'DELETE'});if(!r.ok)throw new Error();toast('حذف شد ✓','ok');loadLinks();}catch(e){toast('خطا','err')}
 }
-function showQR(link){window.open('https://api.qrserver.com/v1/create-qr-code/?size=300x300&data='+encodeURIComponent(link),'_blank')}
+function showQR(link,label){
+  window._qrCurrentLink=link;
+  document.getElementById('qr-modal-title').innerHTML='<i class="ti ti-qrcode"></i> '+(label?esc(label):'QR کانفیگ');
+  const box=document.getElementById('qr-modal-canvas');
+  box.innerHTML='';
+  new QRCode(box,{text:link,width:240,height:240,colorDark:'#000000',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.M});
+  openModal('modal-qr');
+}
 function parseBytesFmt(s){
   if(!s)return 0;
   const m=String(s).match(/([\d.]+)\s*([A-Za-z]+)/);
@@ -1829,7 +2028,7 @@ function renderCfgDashDetail(uuid){
       <div class="card-title"><i class="ti ti-key"></i> ${esc(l.label)} ${l.active&&!l.expired?'<span class="badge bg-green" style="margin-right:6px">فعال</span>':'<span class="badge bg-red" style="margin-right:6px">'+(l.expired?'منقضی':'غیرفعال')+'</span>'}
         <span class="ml-auto" style="display:flex;gap:6px">
           <button class="btn btn-sm btn-blue btn-icon" onclick="navigator.clipboard.writeText('${esc(l.vless_link)}').then(()=>toast('لینک کپی شد','ok'))" title="کپی لینک"><i class="ti ti-copy"></i></button>
-          <button class="btn btn-sm btn-blue btn-icon" onclick="showQR('${esc(l.vless_link)}')" title="QR"><i class="ti ti-qrcode"></i></button>
+          <button class="btn btn-sm btn-blue btn-icon" onclick="showQR('${esc(l.vless_link)}','${esc(l.label)}')" title="QR"><i class="ti ti-qrcode"></i></button>
           <button class="btn btn-sm btn-blue btn-icon" onclick="openLinkChart('${l.uuid}','${esc(l.label)}')" title="نمودار مصرف"><i class="ti ti-chart-line"></i></button>
         </span>
       </div>
@@ -2019,7 +2218,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
-  fetchStats();loadLinks();
+  fetchStats();loadLinks();loadUpdateSettings();
   setInterval(fetchStats,4000);
   setInterval(()=>{
     if(document.getElementById('pg-links').classList.contains('on'))loadLinks();
